@@ -321,7 +321,8 @@ limit lies between the two. At 8 channels, 4 M samples (4 MB) is smaller than
 the ring, so the short runs alone don't prove sustained throughput. A long
 confirmation run followed:
 
-`ratesweep --channels 8 --dividers 5,4,3 --samples 200M`, 4 GB RAM free:
+`ratesweep --channels 8 --dividers 5,4,3 --samples 200M` (Pi 5 with 8 GB RAM,
+7.2 GiB available):
 
 | Rate | Samples | Duration | Violations | Stalls |
 |---|---|---|---|---|
