@@ -351,7 +351,22 @@ pi5la --rate 10M --samples 1000000 --trigger rising:0 --out trig.sr
 On an idle line this should block (Ctrl-C to abort) and start only when the
 condition occurs. There is no pre-trigger buffer: the first captured sample is
 the first one after the trigger.
-**Result:** TBD
+
+**Result:** PASS (2026-09-16), loopback on GPIO 20 → GPIO 2.
+- **Blocking and condition checks,** with the jumper removed so GPIO 2 sat high
+  on its pull-up, each run limited to 5 s by `timeout`:
+  - `low:0`, `falling:0` and `rising:0` blocked.
+  - `high:0` fired immediately.
+  - `rp1sm 0` showed the SM parked on `instr 00002020` (`wait 0 pin 0`).
+- **Edge trigger:** with the jumper on and the line idle high (`pinctrl lev 2,20`
+  = `1 1`), `--trigger rising:0 --samples 1000000` waited 30.1 s until
+  `--generator 1k --generator-only` started, then completed with 0 stalls.
+  The first sample was high, and the first change came at sample 4999: one
+  full 5000-sample half period, so the rising edge falls just before sample 0.
+- **Wiring caveat:** GPIO 20 is undriven when no generator is running. An
+  earlier `rising:0` attempt fired straight away because the line wasn't at a
+  known level when the trigger was armed. Check `pinctrl lev` before arming a
+  loopback trigger test.
 
 ### M8 — RLE and pre-trigger buffer
 Not implemented. It is planned only after M0–M7 pass.
