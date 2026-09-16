@@ -126,11 +126,15 @@ static int run_dma(PIO pio, uint sm, int fd, const capture_config_t *cfg,
         }
     }
 
-    /* The final period may run past the requested samples. */
+    /*
+     * The final period may run past the requested samples: report only the
+     * requested bytes, but time the throughput over everything received, since
+     * t_first..t_last spans whole periods.
+     */
     res->bytes = got < total ? got : total;
     res->total_s = t_last > 0 ? t_last - t_enable : 0;
     if (got > period) {
-        res->steady_bytes = (got < total ? got : total) - period;
+        res->steady_bytes = got - period;
         res->steady_s = t_last - t_first;
     }
     return 0;

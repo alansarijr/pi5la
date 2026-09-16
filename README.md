@@ -246,18 +246,25 @@ machine stalled, as expected for this mode.
 pi5la --rate 10M --samples 16000000 --raw dma.bin --out dma.sr --generator 100k
 ```
 Accept when there are no transfer errors (sample correctness is M4).
-**Result (2026-09-16):** 16 000 000 samples in 1.600 s, **10.006 MB/s**, no
-transfer errors, `.sr` written. **RXSTALL was set after all 16 DMA buffers**
-(4 × 1 MiB), so samples were dropped. The wall-clock estimate showed no
-measurable loss (−8395), so each stall is short. How many samples are lost is
-still under investigation. The zero-drop target is not met yet.
+**Result:** PASS (2026-09-16, cyclic DMA, 4 × 1 MiB ring): 16 000 000 samples
+in 1.679 s, **0 stall events**, exit 0, `.sr` written. The same capture with
+`bitprobe --verify` showed exactly 320 000 transitions and 0 violations on
+channel 0, so no samples were lost. The run printed 9.5 MB/s and "782549 lost
+samples", but those numbers came from a reporting bug (the final period was
+left out of the byte count) and were fixed afterwards. Re-measure throughput
+after rebuilding.
+
+The first attempt used piolib one-shot read-ahead (1 MiB buffers). It ran at
+10.006 MB/s but set RXSTALL after all 16 buffers, and 27 run violations were
+seen. See Design notes.
 
 ### Naive vs DMA
 
 | Mode | Rate | Throughput | Stall events |
 |---|---|---|---|
 | naive (M2) | 10 MSa/s | 396.3 kB/s | stalled (checked once at end) |
-| dma (M3) | 10 MSa/s | 10 006 kB/s | 16 / 16 buffers |
+| dma, piolib read-ahead | 10 MSa/s | 10 006 kB/s | 16 / 16 buffers |
+| dma, cyclic (M3) | 10 MSa/s | TBD (re-measure after fix) | 0 |
 
 ### M4 — Correctness and bit order
 1. `bitprobe --map`: prompts you to move the GPIO 20 jumper through GPIO 2..9
@@ -272,7 +279,9 @@ still under investigation. The zero-drop target is not met yet.
    transitions.
 
 Offline analysis of a `--raw` file: `bitprobe --raw-in dma.bin --channels 8`.
-**Result:** map TBD, verify TBD
+**Result:** verify on channel 0 PASS (2026-09-16): 16 M samples at 10 MSa/s,
+320 000 transitions, all runs exactly 50, channels 1–7 constant. The full
+channel map (`--map`) is still TBD.
 
 ### M5 — Rate sweep
 ```bash
