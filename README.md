@@ -71,7 +71,15 @@ ls -l /dev/pio0
   make sure your user is in the `gpio` group. **Don't run pi5la under `sudo` to
   get around this.**
 
-Record the `ls -l /dev/pio0` result here: **TBD**
+Measured on the development Pi 5 (Raspberry Pi OS Bookworm, kernel
+`6.18.50+rpt-rpi-2712`):
+
+```
+crw-rw---- 1 root gpio 239, 0 Sep 15 03:18 /dev/pio0
+```
+
+It is group `gpio` with mode 0660 by default, and the user is in `gpio`, so no
+root is needed. pi5la runs as a normal user.
 
 ### 3. piolib (raspberrypi/utils)
 
@@ -197,7 +205,9 @@ pi5la --generator 1 --generator-only          # LED + resistor on GPIO 20: 1 Hz 
 pi5la --generator 100k --generator-only       # check with a scope / frequency meter
 ```
 Verify without using the capture path.
-**Result:** TBD
+**Result:** PASS (2026-09-16). `--generator 1` reported
+`actual 1.000000 Hz (sqwave_slow)`, and an LED on GPIO 20 blinked with a
+1 s period. The 100 kHz `sqwave` path has not been checked with a scope yet.
 
 ### M2 — Naive capture baseline
 ```bash
