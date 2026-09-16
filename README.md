@@ -181,8 +181,9 @@ drop report go to stderr:
   change the RP1 firmware. pi5la therefore reads the PIO FDEBUG register
   (`0xf0000008`, the address used by piolib's `rp1sm` example) through the
   `READ_HW` ioctl and clears it through `WRITE_HW`, on its own `/dev/pio0`
-  handle. The RP2040 bit layout (RXSTALL = bit `sm`, write 1 to clear) is
-  assumed; run `fdebugtest` to confirm it on your hardware.
+  handle. It uses the RP2040 bit layout: RXSTALL is bit `sm`, and writing 1
+  clears it. `fdebugtest` confirmed this on the development Pi (2026-09-16):
+  FDEBUG read `0x00000001` with SM 0 stalled and `0x00000000` after the clear.
 - **Packing.** `sm_config_set_in_shift(shift_right = true, autopush, 32)` and
   `PIO_FIFO_JOIN_RX` (TX is unused, so the RX FIFO is twice as deep).
 - **Runtime PIO programs.** Channel counts other than 8 and all trigger types
