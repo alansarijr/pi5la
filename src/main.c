@@ -45,7 +45,7 @@ static void usage(FILE *f)
         "  --mode M           dma (default) or naive (M2 baseline)\n"
         "  --generator FREQ   square wave on GPIO %d while capturing (loopback self-test)\n"
         "  --generator-only   run the generator until Ctrl-C, no capture (M1)\n"
-        "  --dma-buf BYTES    DMA bounce buffer size, x%d buffers (default %u)\n"
+        "  --dma-buf BYTES    cyclic DMA period size, ring of %d periods (default %u)\n"
         "\n"
         "Exit status: 0 ok, 1 error, %d dropped samples detected.\n",
         GENERATOR_DEFAULT_GPIO, CAPTURE_DMA_BUF_COUNT, CAPTURE_DMA_BUF_DEFAULT, EXIT_DROPPED);
@@ -92,13 +92,15 @@ static void report(const capture_config_t *cfg, const capture_result_t *res, uin
                 bps / 1e6, sps);
     }
     fprintf(stderr, "stall events: %" PRIu64 " (%s)\n", res->stall_events,
-            cfg->mode == CAPTURE_DMA ? "DMA buffers with RXSTALL set"
+            cfg->mode == CAPTURE_DMA ? "DMA periods with RXSTALL set"
                                      : "RXSTALL checked once at end");
     if (res->est_valid)
         fprintf(stderr, "estimated lost samples: %" PRId64 " (wall clock, +/- scheduling jitter)\n",
                 res->est_lost_samples);
     else
         fprintf(stderr, "estimated lost samples: n/a (capture too short)\n");
+    if (res->overflow)
+        fprintf(stderr, "DMA ring overflow: host fell behind, capture stopped early\n");
     if (res->interrupted)
         fprintf(stderr, "capture interrupted\n");
 }
@@ -331,8 +333,9 @@ int main(int argc, char **argv)
             goto out;
     }
 
-    if (res.stall_events > 0) {
-        fprintf(stderr, "DROPPED SAMPLES: %" PRIu64 " stall event(s)\n", res.stall_events);
+    if (res.stall_events > 0 || res.overflow) {
+        fprintf(stderr, "DROPPED SAMPLES: %" PRIu64 " stall event(s)%s\n", res.stall_events,
+                res.overflow ? ", DMA ring overflow" : "");
         exit_code = EXIT_DROPPED;
     } else if (res.interrupted) {
         exit_code = 1;

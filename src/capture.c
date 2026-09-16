@@ -8,10 +8,10 @@
 
 #include "la8.pio.h"
 #include "la8_trig.pio.h"
+#include "dmacyclic.h"
 #include "fdebug.h"
 #include "unpack.h"
 
-#define QCAP (CAPTURE_DMA_BUF_COUNT + 1)
 
 static bool same_program(const la_prog_t *built, const pio_program_t *ref, uint wrap_target,
                          uint wrap)
@@ -75,87 +75,50 @@ static void finish_estimate(const capture_config_t *cfg, capture_result_t *res)
 }
 
 /*
- * Rotating DMA read-ahead (rp1-pio on kernel 6.18+):
- *   pio_sm_xfer_data(..., len, NULL) queues a receive of len bytes and returns;
- *   pio_sm_xfer_data(..., len, buf) waits for the oldest queued buffer and copies it.
- * Up to CAPTURE_DMA_BUF_COUNT receives are kept queued so the SM always has a
- * DMA destination while user space copies a completed buffer out.
- *
- * One extra "guard" buffer is queued after the data. It keeps the FIFO drained
- * while the RXSTALL flag is checked after the final data buffer, so the stall
- * that inevitably follows the end of the capture is not counted.
+ * Cyclic DMA (see dmacyclic.h): the kernel ring is configured and running
+ * before the SM is enabled; each read returns the next completed period.
+ * Because DMA never stops draining the FIFO, the SM does not stall when the
+ * capture ends, so FDEBUG can be checked after the last period without a
+ * false positive.
  */
 static int run_dma(PIO pio, uint sm, int fd, const capture_config_t *cfg,
-                   capture_result_t *res)
+                   capture_result_t *res, size_t capacity_bytes)
 {
     size_t total = res->n_words * 4;
-    size_t buf = cfg->dma_buf_bytes;
-    size_t submitted = 0, got = 0, first_len = 0;
-    size_t queue[QCAP];
-    unsigned q_head = 0, q_len = 0;
-    bool guard_queued = false;
+    size_t period = cfg->dma_buf_bytes;
+    size_t got = 0;
     double t_enable, t_first = 0, t_last = 0;
     int stall;
-
-    while (q_len < CAPTURE_DMA_BUF_COUNT && !guard_queued) {
-        size_t len = submitted < total ? (total - submitted < buf ? total - submitted : buf) : buf;
-
-        if (pio_sm_xfer_data(pio, sm, PIO_DIR_FROM_SM, (uint)len, NULL) < 0) {
-            fprintf(stderr, "capture: queueing DMA receive failed: %s\n", strerror(errno));
-            return -1;
-        }
-        queue[(q_head + q_len++) % QCAP] = len;
-        if (submitted < total)
-            submitted += len;
-        else
-            guard_queued = true;
-    }
 
     pio_sm_set_enabled(pio, sm, true);
     t_enable = monotonic_s();
 
     while (got < total) {
-        size_t len = queue[q_head];
-
-        if (pio_sm_xfer_data(pio, sm, PIO_DIR_FROM_SM, (uint)len,
-                             (uint8_t *)res->words + got) < 0) {
+        if (got + period > capacity_bytes) {
+            fprintf(stderr, "capture: internal error: buffer too small<NL>");
+            return -1;
+        }
+        if (dmacyclic_read(fd, sm, (uint32_t)period, (uint8_t *)res->words + got)) {
+            if (errno == EOVERFLOW) {
+                res->overflow = true;
+                break;
+            }
             if (stopped(cfg)) {
                 res->interrupted = true;
                 break;
             }
-            fprintf(stderr, "capture: DMA receive failed: %s\n", strerror(errno));
+            fprintf(stderr, "capture: DMA receive failed: %s<NL>", strerror(errno));
             return -1;
         }
         t_last = monotonic_s();
-        q_head = (q_head + 1) % QCAP;
-        q_len--;
-
-        if (got == 0) {
+        if (got == 0)
             t_first = t_last;
-            first_len = len;
-        }
-        got += len;
+        got += period;
 
         stall = take_rxstall(fd, sm);
         if (stall < 0)
             return -1;
         res->stall_events += (uint64_t)stall;
-
-        if (!guard_queued) {
-            size_t next = submitted < total
-                              ? (total - submitted < buf ? total - submitted : buf)
-                              : buf;
-
-            if (pio_sm_xfer_data(pio, sm, PIO_DIR_FROM_SM, (uint)next, NULL) < 0) {
-                fprintf(stderr, "capture: queueing DMA receive failed: %s\n", strerror(errno));
-                return -1;
-            }
-            queue[(q_head + q_len++) % QCAP] = next;
-            if (submitted < total)
-                submitted += next;
-            else
-                guard_queued = true;
-        }
 
         if (stopped(cfg)) {
             res->interrupted = true;
@@ -163,10 +126,11 @@ static int run_dma(PIO pio, uint sm, int fd, const capture_config_t *cfg,
         }
     }
 
-    res->bytes = got;
+    /* The final period may run past the requested samples. */
+    res->bytes = got < total ? got : total;
     res->total_s = t_last > 0 ? t_last - t_enable : 0;
-    if (got > first_len) {
-        res->steady_bytes = got - first_len;
+    if (got > period) {
+        res->steady_bytes = (got < total ? got : total) - period;
         res->steady_s = t_last - t_first;
     }
     return 0;
@@ -217,6 +181,7 @@ int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
     pio_sm_config c;
     la_prog_t lp;
     unsigned spw, k;
+    size_t capacity_bytes;
     uint offset;
     int sm, ret, fd;
 
@@ -248,7 +213,12 @@ int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
 
     spw = unpack_samples_per_word(cfg->channels);
     res->n_words = (size_t)((cfg->samples + spw - 1) / spw);
-    res->words = malloc(res->n_words * sizeof(uint32_t));
+    capacity_bytes = res->n_words * 4;
+    /* DMA reads whole periods, so round the buffer up to a period multiple. */
+    if (cfg->mode == CAPTURE_DMA)
+        capacity_bytes = (capacity_bytes + cfg->dma_buf_bytes - 1) / cfg->dma_buf_bytes *
+                         cfg->dma_buf_bytes;
+    res->words = malloc(capacity_bytes);
     if (!res->words) {
         fprintf(stderr, "capture: cannot allocate %zu words\n", res->n_words);
         return -1;
@@ -281,9 +251,8 @@ int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
     }
 
     if (cfg->mode == CAPTURE_DMA &&
-        pio_sm_config_xfer(pio, sm, PIO_DIR_FROM_SM, cfg->dma_buf_bytes,
-                           CAPTURE_DMA_BUF_COUNT) < 0) {
-        fprintf(stderr, "capture: pio_sm_config_xfer(%u x %u bytes) failed: %s\n",
+        dmacyclic_config(fd, (unsigned)sm, cfg->dma_buf_bytes, CAPTURE_DMA_BUF_COUNT) < 0) {
+        fprintf(stderr, "capture: cyclic DMA config (%u x %u bytes) failed: %s\n",
                 CAPTURE_DMA_BUF_COUNT, cfg->dma_buf_bytes, strerror(errno));
         pio_remove_program(pio, &program, offset);
         pio_sm_unclaim(pio, sm);
@@ -305,7 +274,7 @@ int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
     if (take_rxstall(fd, (uint)sm) < 0)
         ret = -1;
     else if (cfg->mode == CAPTURE_DMA)
-        ret = run_dma(pio, (uint)sm, fd, cfg, res);
+        ret = run_dma(pio, (uint)sm, fd, cfg, res, capacity_bytes);
     else
         ret = run_naive(pio, (uint)sm, fd, cfg, res);
 

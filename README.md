@@ -54,7 +54,7 @@ sudo apt install git build-essential cmake pkg-config libzip-dev \
 ### 2. Driver and permissions
 
 ```bash
-uname -r              # this project targets kernel 6.18+ (DMA read-ahead)
+uname -r              # this project targets kernel 6.18+ (cyclic DMA)
 ls -l /dev/pio0
 ```
 
@@ -148,7 +148,7 @@ pi5la --generator 1 --generator-only
 | `--mode` | `dma` (default) or `naive` (the M2 baseline). |
 | `--generator` | Square wave on GPIO 20 during capture, for loopback self-test. |
 | `--generator-only` | Run only the generator until Ctrl-C (M1). |
-| `--dma-buf` | Size of each DMA bounce buffer (4 buffers are used). |
+| `--dma-buf` | Cyclic DMA period size in bytes (the ring holds 4 periods). |
 
 Exit status: `0` OK, `1` error, `2` dropped samples detected. Stats and the
 drop report go to stderr:
@@ -166,14 +166,21 @@ drop report go to stderr:
 ## Design notes
 
 - **No word-by-word polling.** piolib calls are RPCs to RP1 firmware over PCIe.
-  Bulk capture uses piolib's DMA API only (`pio_sm_config_xfer` /
-  `pio_sm_xfer_data`). `--mode naive` exists only as the M2 baseline.
-- **DMA read-ahead (kernel 6.18+).** `pio_sm_xfer_data(..., NULL)` queues a
-  receive and returns; a call with a buffer waits for the oldest queued receive.
-  pi5la keeps 4 receives queued, reads one, then queues the next. A final
-  *guard* receive stays queued while RXSTALL is checked after the last data
-  buffer, so the stall that follows the end of the capture isn't counted. On
-  6.12 kernels `NULL` read-ahead returns `-EINVAL`, and this path does not work.
+  Bulk capture uses DMA only. `--mode naive` exists only as the M2 baseline.
+- **Cyclic DMA (kernel 6.18+).** Capture uses the kernel's cyclic DMA mode:
+  `PIO_IOC_SM_CONFIG_XFER_V2` with `RP1_PIO_SM_CONFIG_XFER_FL_DMA_CYCLE` on a
+  ring of 4 periods (`--dma-buf` sets the period size), then one
+  `PIO_IOC_SM_XFER_DATA32` read per completed period (`src/dmacyclic.c`). The
+  DMA controller (`dw-axi-dmac`) links the last period back to the first in
+  hardware, so there is no hand-over gap. If pi5la falls more than 4 periods
+  behind, the read fails with `-EOVERFLOW`, and that counts as dropped samples.
+  piolib has no API for cyclic mode, so these ioctls go on pi5la's own
+  `/dev/pio0` handle.
+  - *Why not piolib read-ahead:* the first version queued one-shot receives
+    with `pio_sm_xfer_data(..., NULL)`. On the development Pi, RXSTALL fired
+    exactly once per buffer hand-over at 10 MSa/s: 245 stalls with 64 KiB
+    buffers, 16 with 1 MiB, 4 with 4 MiB. Each stall lost a few dozen samples,
+    because the 16-word FIFO covers only 6.4 µs.
 - **Stall detection via FDEBUG.** piolib's `pio_sm_get_flags()` needs RP1
   firmware op `PIO_SM_GET_FLAGS` (op 33). The development Pi's RP1 firmware
   (`23fca1cd…`, `op count 33`) doesn't have it, and piolib panicked with

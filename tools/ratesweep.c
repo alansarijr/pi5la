@@ -223,7 +223,9 @@ int main(int argc, char **argv)
                     "ch=%u rate=%.0f samples=%" PRIu64 " runs=%" PRIu64 " violations=%" PRIu64
                     " (%.4f%%) run min/max=%" PRIu64 "/%" PRIu64 " stalls=%" PRIu64 "%s\n",
                     ch, res.rate_hz, got, st.runs, st.violations, pct, st.min_run, st.max_run,
-                    res.stall_events, st.runs == 0 ? "  NO SIGNAL: check jumper" : "");
+                    res.stall_events,
+                    res.overflow ? "  DMA RING OVERFLOW"
+                                 : (st.runs == 0 ? "  NO SIGNAL: check jumper" : ""));
 
             if (st.runs > 0 && st.violations == 0 && res.rate_hz > best[ch])
                 best[ch] = res.rate_hz;

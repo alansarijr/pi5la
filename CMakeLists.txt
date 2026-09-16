@@ -64,6 +64,7 @@ if(NOT PI5LA_TESTS_ONLY)
 
     add_library(pi5la_hw STATIC
         src/capture.c
+        src/dmacyclic.c
         src/fdebug.c
         src/generator.c
     )

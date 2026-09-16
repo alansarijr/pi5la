@@ -11,7 +11,7 @@
 #include "util.h"
 
 #define CAPTURE_GPIO_COUNT 28        /* RP1 PIO drives GPIO 0..27 */
-#define CAPTURE_DMA_BUF_COUNT 4      /* rp1-pio DMA_BOUNCE_BUFFER_COUNT */
+#define CAPTURE_DMA_BUF_COUNT 4      /* cyclic ring periods (rp1-pio max 4) */
 #define CAPTURE_DMA_BUF_DEFAULT (1u << 20)
 
 typedef enum {
@@ -27,7 +27,7 @@ typedef struct {
     capture_mode_t mode;
     trig_type_t trig;
     unsigned trig_pin;          /* relative to base_gpio */
-    uint32_t dma_buf_bytes;     /* per bounce buffer, multiple of 4 */
+    uint32_t dma_buf_bytes;     /* cyclic DMA period, multiple of 4 */
     volatile sig_atomic_t *stop; /* optional: set from a signal handler */
 } capture_config_t;
 
@@ -42,10 +42,11 @@ typedef struct {
     double steady_s;            /* first buffer/word -> last data */
 
     /* Drop detection */
-    uint64_t stall_events;      /* FDEBUG RXSTALL seen: DMA per buffer; naive 0/1 at end */
+    uint64_t stall_events;      /* FDEBUG RXSTALL seen: DMA per period; naive 0/1 at end */
     bool est_valid;
     int64_t est_lost_samples;   /* rate * steady_s - samples in steady_bytes */
 
+    bool overflow;              /* DMA ring wrapped over unread data; capture cut short */
     bool interrupted;
 } capture_result_t;
 

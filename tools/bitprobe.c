@@ -173,6 +173,8 @@ static int capture_locked(PIO pio, unsigned base, unsigned channels, clkdiv_t di
     generator_stop(&gen);
     if (ret == 0 && res->stall_events)
         fprintf(stderr, "warning: %" PRIu64 " stall event(s) during capture\n", res->stall_events);
+    if (ret == 0 && res->overflow)
+        fprintf(stderr, "warning: DMA ring overflow, capture cut short\n");
     return ret;
 }
 
@@ -425,7 +427,7 @@ int main(int argc, char **argv)
             if (k == verify_ch ? (st.runs == 0 || st.violations != 0) : st.transitions != 0)
                 pass = 0;
         }
-        if (res.stall_events)
+        if (res.stall_events || res.overflow)
             pass = 0;
         printf("%s\n", pass ? "PASS" : "FAIL");
         free(buf);
