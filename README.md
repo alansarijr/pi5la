@@ -302,7 +302,24 @@ ratesweep --out ratesweep.csv            # jumper GPIO 20 -> GPIO 2
 Columns: `channels,sample_rate,samples_captured,violations,violation_pct`.
 Only integer dividers are swept (200 MHz / {100,40,20,10,8,5,4,2,1}). The
 generator is locked to the capture clock with a 25-sample half period.
-**Result:** highest clean rate: 1 ch TBD, 2 ch TBD, 4 ch TBD, 8 ch TBD
+**Result (2026-09-16, provisional):** cyclic DMA with a 4 × 1 MiB ring,
+4 000 000 samples per point, 25-sample half period on channel 0.
+
+| Channels | Highest clean rate | Packed data rate | First failing rate |
+|---|---|---|---|
+| 1 | 200 MSa/s (max swept) | 25 MB/s | — |
+| 2 | 200 MSa/s (max swept) | 50 MB/s | — |
+| 4 | 100 MSa/s | 50 MB/s | 200 MSa/s: 2 stalls, 55.9 % violations |
+| 8 | 50 MSa/s | 50 MB/s | 100 MSa/s: 4 stalls, 80.7 % violations |
+
+Every channel count is clean at 50 MB/s and fails at 100 MB/s, so the DMA
+limit lies between the two. **Caveat:** at 8 channels, 4 M samples is 4 MB,
+less than the ring, so these short runs don't prove sustained host-side
+throughput. A confirmation run at 8 ch with dividers 5, 4, 3 and 200 M samples
+is pending.
+
+Note: a first sweep had the jumper on the wrong pin. Every row then read
+`violations=0, violation_pct=100` (no runs found = no signal).
 
 ### M6 — sigrok output
 Capture a real 115200-baud UART **through the buffer described above**, open
