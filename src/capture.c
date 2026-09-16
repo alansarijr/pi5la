@@ -8,6 +8,7 @@
 
 #include "la8.pio.h"
 #include "la8_trig.pio.h"
+#include "fdebug.h"
 #include "unpack.h"
 
 #define QCAP (CAPTURE_DMA_BUF_COUNT + 1)
@@ -35,6 +36,24 @@ bool capture_selftest_programs(void)
         return false;
     }
     return true;
+}
+
+/* 1 if RXSTALL was set for sm (it is then cleared), 0 if not, -1 on error. */
+static int take_rxstall(int fd, uint sm)
+{
+    uint32_t v;
+
+    if (fdebug_read(fd, &v)) {
+        fprintf(stderr, "capture: reading FDEBUG failed: %s\n", strerror(errno));
+        return -1;
+    }
+    if (!(v & FDEBUG_RXSTALL(sm)))
+        return 0;
+    if (fdebug_clear(fd, FDEBUG_RXSTALL(sm))) {
+        fprintf(stderr, "capture: clearing FDEBUG failed: %s\n", strerror(errno));
+        return -1;
+    }
+    return 1;
 }
 
 static bool stopped(const capture_config_t *cfg)
@@ -66,7 +85,8 @@ static void finish_estimate(const capture_config_t *cfg, capture_result_t *res)
  * while the RXSTALL flag is checked after the final data buffer, so the stall
  * that inevitably follows the end of the capture is not counted.
  */
-static int run_dma(PIO pio, uint sm, const capture_config_t *cfg, capture_result_t *res)
+static int run_dma(PIO pio, uint sm, int fd, const capture_config_t *cfg,
+                   capture_result_t *res)
 {
     size_t total = res->n_words * 4;
     size_t buf = cfg->dma_buf_bytes;
@@ -75,6 +95,7 @@ static int run_dma(PIO pio, uint sm, const capture_config_t *cfg, capture_result
     unsigned q_head = 0, q_len = 0;
     bool guard_queued = false;
     double t_enable, t_first = 0, t_last = 0;
+    int stall;
 
     while (q_len < CAPTURE_DMA_BUF_COUNT && !guard_queued) {
         size_t len = submitted < total ? (total - submitted < buf ? total - submitted : buf) : buf;
@@ -115,8 +136,10 @@ static int run_dma(PIO pio, uint sm, const capture_config_t *cfg, capture_result
         }
         got += len;
 
-        if (pio_sm_get_flags(pio, sm, PIO_SM_FLAG_RXSTALL, true) & PIO_SM_FLAG_RXSTALL)
-            res->stall_events++;
+        stall = take_rxstall(fd, sm);
+        if (stall < 0)
+            return -1;
+        res->stall_events += (uint64_t)stall;
 
         if (!guard_queued) {
             size_t next = submitted < total
@@ -153,10 +176,12 @@ static int run_dma(PIO pio, uint sm, const capture_config_t *cfg, capture_result
  * Milestone 2 baseline: one PCIe round trip per FIFO word. Deliberately slow.
  * RXSTALL is read once, straight after the last word.
  */
-static int run_naive(PIO pio, uint sm, const capture_config_t *cfg, capture_result_t *res)
+static int run_naive(PIO pio, uint sm, int fd, const capture_config_t *cfg,
+                     capture_result_t *res)
 {
     double t_enable, t_first = 0, t_last = 0;
     size_t i;
+    int stall;
 
     pio_sm_set_enabled(pio, sm, true);
     t_enable = monotonic_s();
@@ -172,8 +197,10 @@ static int run_naive(PIO pio, uint sm, const capture_config_t *cfg, capture_resu
     }
     t_last = monotonic_s();
 
-    if (pio_sm_get_flags(pio, sm, PIO_SM_FLAG_RXSTALL, true) & PIO_SM_FLAG_RXSTALL)
-        res->stall_events = 1;
+    stall = take_rxstall(fd, sm);
+    if (stall < 0)
+        return -1;
+    res->stall_events = (uint64_t)stall;
 
     res->bytes = (uint64_t)i * 4;
     res->total_s = t_last - t_enable;
@@ -191,7 +218,7 @@ int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
     la_prog_t lp;
     unsigned spw, k;
     uint offset;
-    int sm, ret;
+    int sm, ret, fd;
 
     memset(res, 0, sizeof(*res));
 
@@ -233,15 +260,23 @@ int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
     program.origin = -1;
     program.pio_version = 0;
 
+    fd = fdebug_open();
+    if (fd < 0) {
+        fprintf(stderr, "capture: opening /dev/pio0 for FDEBUG: %s\n", strerror(errno));
+        return -1;
+    }
+
     sm = pio_claim_unused_sm(pio, false);
     if (sm < 0) {
         fprintf(stderr, "capture: no free PIO state machine\n");
+        fdebug_close(fd);
         return -1;
     }
     offset = pio_add_program(pio, &program);
     if (offset == PIO_ORIGIN_INVALID) {
         fprintf(stderr, "capture: no PIO program space\n");
         pio_sm_unclaim(pio, sm);
+        fdebug_close(fd);
         return -1;
     }
 
@@ -252,6 +287,7 @@ int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
                 CAPTURE_DMA_BUF_COUNT, cfg->dma_buf_bytes, strerror(errno));
         pio_remove_program(pio, &program, offset);
         pio_sm_unclaim(pio, sm);
+        fdebug_close(fd);
         return -1;
     }
 
@@ -266,16 +302,17 @@ int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
     sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
     sm_config_set_clkdiv_int_frac(&c, cfg->div.div_int, cfg->div.div_frac);
     pio_sm_init(pio, sm, offset, &c);
-    pio_sm_clear_flags(pio, sm, PIO_SM_FLAG_ALL);
-
-    if (cfg->mode == CAPTURE_DMA)
-        ret = run_dma(pio, (uint)sm, cfg, res);
+    if (take_rxstall(fd, (uint)sm) < 0)
+        ret = -1;
+    else if (cfg->mode == CAPTURE_DMA)
+        ret = run_dma(pio, (uint)sm, fd, cfg, res);
     else
-        ret = run_naive(pio, (uint)sm, cfg, res);
+        ret = run_naive(pio, (uint)sm, fd, cfg, res);
 
     pio_sm_set_enabled(pio, sm, false);
     pio_remove_program(pio, &program, offset);
     pio_sm_unclaim(pio, sm);
+    fdebug_close(fd);
 
     if (ret == 0)
         finish_estimate(cfg, res);

@@ -64,6 +64,7 @@ if(NOT PI5LA_TESTS_ONLY)
 
     add_library(pi5la_hw STATIC
         src/capture.c
+        src/fdebug.c
         src/generator.c
     )
     add_dependencies(pi5la_hw pi5la_pio_headers)
@@ -79,7 +80,10 @@ if(NOT PI5LA_TESTS_ONLY)
     add_executable(bitprobe tools/bitprobe.c)
     target_link_libraries(bitprobe PRIVATE pi5la_hw)
 
-    install(TARGETS pi5la ratesweep bitprobe RUNTIME DESTINATION bin)
+    add_executable(fdebugtest tools/fdebugtest.c)
+    target_link_libraries(fdebugtest PRIVATE pi5la_hw)
+
+    install(TARGETS pi5la ratesweep bitprobe fdebugtest RUNTIME DESTINATION bin)
 endif()
 
 enable_testing()

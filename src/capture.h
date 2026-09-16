@@ -42,7 +42,7 @@ typedef struct {
     double steady_s;            /* first buffer/word -> last data */
 
     /* Drop detection */
-    uint64_t stall_events;      /* DMA: buffers with RXSTALL set; naive: 0/1 at end */
+    uint64_t stall_events;      /* FDEBUG RXSTALL seen: DMA per buffer; naive 0/1 at end */
     bool est_valid;
     int64_t est_lost_samples;   /* rate * steady_s - samples in steady_bytes */
 

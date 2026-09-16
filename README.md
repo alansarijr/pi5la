@@ -174,6 +174,15 @@ drop report go to stderr:
   *guard* receive stays queued while RXSTALL is checked after the last data
   buffer, so the stall that follows the end of the capture isn't counted. On
   6.12 kernels `NULL` read-ahead returns `-EINVAL`, and this path does not work.
+- **Stall detection via FDEBUG.** piolib's `pio_sm_get_flags()` needs RP1
+  firmware op `PIO_SM_GET_FLAGS` (op 33). The development Pi's RP1 firmware
+  (`23fca1cd…`, `op count 33`) doesn't have it, and piolib panicked with
+  `Failed to get FIFO flags`. A bootloader EEPROM update (2026/05/26) did not
+  change the RP1 firmware. pi5la therefore reads the PIO FDEBUG register
+  (`0xf0000008`, the address used by piolib's `rp1sm` example) through the
+  `READ_HW` ioctl and clears it through `WRITE_HW`, on its own `/dev/pio0`
+  handle. The RP2040 bit layout (RXSTALL = bit `sm`, write 1 to clear) is
+  assumed; run `fdebugtest` to confirm it on your hardware.
 - **Packing.** `sm_config_set_in_shift(shift_right = true, autopush, 32)` and
   `PIO_FIFO_JOIN_RX` (TX is unused, so the RX FIFO is twice as deep).
 - **Runtime PIO programs.** Channel counts other than 8 and all trigger types
@@ -210,6 +219,12 @@ Verify without using the capture path.
 1 s period. The 100 kHz `sqwave` path has not been checked with a scope yet.
 
 ### M2 — Naive capture baseline
+First confirm that stall detection works (no wiring needed). It must print
+`PASS`:
+```bash
+fdebugtest
+```
+Then:
 ```bash
 pi5la --mode naive --rate 10M --samples 400000 --raw naive.bin
 ```
