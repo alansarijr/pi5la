@@ -251,8 +251,9 @@ in 1.679 s, **0 stall events**, exit 0, `.sr` written. The same capture with
 `bitprobe --verify` showed exactly 320 000 transitions and 0 violations on
 channel 0, so no samples were lost. The run printed 9.5 MB/s and "782549 lost
 samples", but those numbers came from a reporting bug (the final period was
-left out of the byte count) and were fixed afterwards. Re-measure throughput
-after rebuilding.
+left out of the byte count) and were fixed afterwards. After the fix, a
+10 000 000-sample capture during M6 measured **10.000 MB/s**, 0 stalls, with an
+estimated loss of 178 samples (within wall-clock jitter).
 
 The first attempt used piolib one-shot read-ahead (1 MiB buffers). It ran at
 10.006 MB/s but set RXSTALL after all 16 buffers, and 27 run violations were
@@ -264,7 +265,7 @@ seen. See Design notes.
 |---|---|---|---|
 | naive (M2) | 10 MSa/s | 396.3 kB/s | stalled (checked once at end) |
 | dma, piolib read-ahead | 10 MSa/s | 10 006 kB/s | 16 / 16 buffers |
-| dma, cyclic (M3) | 10 MSa/s | TBD (re-measure after fix) | 0 |
+| dma, cyclic (M3) | 10 MSa/s | 10 000 kB/s | 0 |
 
 ### M4 — Correctness and bit order
 1. `bitprobe --map`: prompts you to move the GPIO 20 jumper through GPIO 2..9
@@ -342,7 +343,26 @@ with what was sent.
 ```bash
 pi5la --rate 10M --samples 10000000 --out uart.sr
 ```
-**Result:** TBD
+**Result (2026-09-16):** byte-exact decode, using the Pi 5's own UART in
+loopback. No external target was connected, so no buffer was needed.
+- **Setup:** `dtparam=uart0=on` in `/boot/firmware/config.txt` (plus a reboot)
+  creates `/dev/ttyAMA0` on GPIO 14 (TXD0). A jumper runs from pin 8 (GPIO 14)
+  to pin 3 (GPIO 2, channel 0). The port was configured with
+  `stty -F /dev/ttyAMA0 115200 raw -echo`.
+- **Data:** `sent.txt` has 200 lines of the form
+  `pi5la M6 line NNN ABCDEFGHIJKLMNOPQRSTUVWXYZ\r\n` (8000 bytes). It was sent
+  with `cat` 0.2 s after starting the capture.
+- **Capture:** `pi5la --rate 10M --samples 10000000 --out uart.sr` recorded
+  10 M samples at 10.000 MB/s, 0 stalls, exit 0. Channel 0 had 60 922
+  transitions.
+- **Decode:**
+  `sigrok-cli -i uart.sr -P uart:rx=GPIO2:baudrate=115200 -B uart=rx > decoded.txt`,
+  then `cmp sent.txt decoded.txt` reported **MATCH**. sigrok read the metadata
+  correctly (10 MHz, 8 channels GPIO2–GPIO9, 10 000 000 samples).
+- **Still open:** the PulseView visual check on the Pi, and a test with an
+  external target (ESP32) through the 74LVC245 front end.
+- **Troubleshooting note:** after a reboot, GPIO 2 has no function and its input
+  is disabled, so `pinctrl lev 2` prints `-` until pi5la has run once.
 
 ### M7 — Hardware trigger
 ```bash
