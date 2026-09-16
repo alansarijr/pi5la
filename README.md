@@ -279,9 +279,21 @@ seen. See Design notes.
    transitions.
 
 Offline analysis of a `--raw` file: `bitprobe --raw-in dma.bin --channels 8`.
-**Result:** verify on channel 0 PASS (2026-09-16): 16 M samples at 10 MSa/s,
-320 000 transitions, all runs exactly 50, channels 1–7 constant. The full
-channel map (`--map`) is still TBD.
+**Result:** PASS (2026-09-16).
+- **Map:** `bitprobe --probe` was run with the generator jumpered to each of
+  GPIO 2..9 in turn, checking with `pinctrl lev` before each capture. Channel
+  k was active in word bits k, k+8, k+16, k+24, in that chronological order,
+  for every k from 0 to 7. This is the layout already in `src/unpack.c` (slot 0
+  = low byte, channel k = bit k), so no table change was needed.
+- **Verify:** `bitprobe --verify 0 --generator 100k --rate 10M --samples 16M`
+  gave 320 000 transitions with every run exactly 50 samples, channels 1–7
+  constant, and 0 stalls.
+- **Wiring tip:** check with
+  `for i in 1 2 3 4 5 6; do pinctrl lev 2-9,20; sleep 0.5; done`, running
+  `pi5la --generator 1 --generator-only`, before every probe. An empty probe
+  ("0 active bits") meant the jumper wasn't connected to a capture pin.
+  `bitprobe --map` is interactive, and a jumper that hasn't actually moved
+  makes it report channel 0 for every step.
 
 ### M5 — Rate sweep
 ```bash

@@ -66,7 +66,7 @@ int main(void)
     roundtrip(4);
     roundtrip(8);
 
-    /* Provisional (theoretical) layout: slot 0 in the low byte. Update with M4. */
+    /* Layout measured on hardware in M4: slot 0 in the low byte, channel k at bit k. */
     unpack_words(&w, 1, 8, out, 4);
     CHECK(out[0] == 1 && out[1] == 2 && out[2] == 3 && out[3] == 4);
 

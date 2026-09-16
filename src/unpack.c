@@ -3,14 +3,16 @@
 /*
  * Channel/slot -> word bit map, indexed [slot][channel].
  *
- * PROVISIONAL: these are the theoretical positions for
- * sm_config_set_in_shift(shift_right = true, autopush, 32). Each `in pins, N`
- * shifts the ISR right by N and inserts the pins at the top with pin order
- * preserved, so after 32/N samples the oldest sample occupies bits 0..N-1 and
- * channel k of slot s lands at bit s*N + k.
+ * With sm_config_set_in_shift(shift_right = true, autopush, 32), each
+ * `in pins, N` shifts the ISR right by N and inserts the pins at the top with
+ * pin order preserved, so after 32/N samples the oldest sample occupies bits
+ * 0..N-1 and channel k of slot s lands at bit s*N + k.
  *
- * Milestone 4 replaces this with the measured map: run tools/bitprobe --map
- * and paste the table it prints over the matching one below.
+ * 8 channels: MEASURED on a Pi 5 (Milestone 4, 2026-09-16). tools/bitprobe
+ * --probe with the generator jumpered to each of GPIO 2..9 in turn found
+ * channel k active in bits k, k+8, k+16, k+24 in that chronological order,
+ * matching the table below. The 1/2/4-channel tables follow the same rule but
+ * have not been measured.
  */
 static const uint8_t map_8ch[4][8] = {
     {  0,  1,  2,  3,  4,  5,  6,  7 },
