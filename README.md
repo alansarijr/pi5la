@@ -231,21 +231,26 @@ pi5la --mode naive --rate 10M --samples 400000 --raw naive.bin
 ```
 Read the `throughput` line. Expect about 250 kB/s. RXSTALL will be set, which
 is expected for this mode.
-**Result:** TBD kB/s
+**Result:** PASS (2026-09-16): **396.3 kB/s** (396 295 samples/s). The state
+machine stalled, as expected for this mode.
 
 ### M3 — DMA capture
 ```bash
 pi5la --rate 10M --samples 16000000 --raw dma.bin --out dma.sr --generator 100k
 ```
 Accept when there are no transfer errors (sample correctness is M4).
-**Result:** TBD MB/s, stall events TBD
+**Result (2026-09-16):** 16 000 000 samples in 1.600 s, **10.006 MB/s**, no
+transfer errors, `.sr` written. **RXSTALL was set after all 16 DMA buffers**
+(4 × 1 MiB), so samples were dropped. The wall-clock estimate showed no
+measurable loss (−8395), so each stall is short. How many samples are lost is
+still under investigation. The zero-drop target is not met yet.
 
 ### Naive vs DMA
 
 | Mode | Rate | Throughput | Stall events |
 |---|---|---|---|
-| naive (M2) | 10 MSa/s | TBD | TBD |
-| dma (M3) | 10 MSa/s | TBD | TBD |
+| naive (M2) | 10 MSa/s | 396.3 kB/s | stalled (checked once at end) |
+| dma (M3) | 10 MSa/s | 10 006 kB/s | 16 / 16 buffers |
 
 ### M4 — Correctness and bit order
 1. `bitprobe --map`: prompts you to move the GPIO 20 jumper through GPIO 2..9
