@@ -5,10 +5,10 @@ Pi 5's RP1 southbridge. It writes sigrok `.sr` files that open in PulseView.
 
 Target: 10 MSa/s on 8 channels, sustained, with **zero dropped samples**.
 
-> **Status:** M1–M7 are verified on Pi 5 hardware (2026-09-16/17). The spec
+> **Status:** M0–M7 are verified on Pi 5 hardware (2026-09-16/17). The spec
 > target is met, and the reliable ceiling is 50 MB/s of packed data: 8 ch at
 > 50 MSa/s, 4 ch at 100 MSa/s, 1–2 ch at 200 MSa/s. Still unverified on the Pi:
-> the stock `piopwm` check (M0) and live `--stream` / `uart-listen`. M8 is not
+> live `--stream` / `uart-listen` and the PulseView visual check. M8 is not
 > implemented. Findings are collected in `REPORT.md`.
 
 ---
@@ -42,8 +42,7 @@ target GND ───────────────────────
 
 ## Build (M0)
 
-These are the commands used to build pi5la on the development Pi 5. Only the
-stock `piopwm` example check below has not been explicitly confirmed.
+These are the commands used to build pi5la on the development Pi 5.
 
 ### 1. Prerequisites
 
@@ -310,7 +309,19 @@ Each one needs its acceptance test to pass on the Pi before the next one.
 ### M0 — Toolchain bring-up
 Follow [Build](#build-m0). Accept when a stock piolib example runs without
 error.
-**Result:** TBD
+**Result:** PASS (2026-09-17). The stock example was run on GPIO 20 instead of
+GPIO 4, so the existing loopback jumper (pin 38 → pin 3) could show the output
+on GPIO 2:
+
+```bash
+timeout 14 ~/utils/build/piolib/examples/piopwm 20 & sleep 1; pinctrl get 20;   for i in $(seq 1 24); do pinctrl lev 2,20; sleep 0.5; done; wait %1; echo "exit=$?"
+```
+
+- It printed `Loaded program at 25, using sm 0, gpio 20`, with no errors.
+- `pinctrl get 20` showed `a7 … // GPIO20 = PIO20`: the pin was handed to PIO.
+- GPIO 2 matched GPIO 20 in all 24 readings. Readings were all low for the
+  first ~6 s, then increasingly high as the PWM duty cycle ramped up.
+- Exit status 124, from `timeout` stopping the endless example as intended.
 
 ### M1 — Test signal generator
 ```bash
@@ -484,6 +495,10 @@ Every run on channel 0 was exactly 25 samples.
 **Conclusion:** 50 MB/s of packed data is reliable (15 / 15 clean runs,
 3 GB of samples); 66.7 MB/s is not (9 / 20); 100 MB/s fails outright. The
 edge lies between 50 and 66.7 MB/s; integer dividers can't test in between.
+
+**Decision (2026-09-17):** 50 MB/s is the documented limit. Fractional-divider
+tests between 50 and 66.7 MB/s were not pursued: they would gain at most ~30 %
+with uneven sample spacing, close to the drop edge.
 
 
 

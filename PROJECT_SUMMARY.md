@@ -27,7 +27,7 @@ open in PulseView, and can listen to a UART live.
 
 | Milestone | Status |
 |---|---|
-| M0 Toolchain | Builds and runs. The stock `piopwm` example hasn't been explicitly confirmed |
+| M0 Toolchain | ✅ builds; stock `piopwm` example runs without errors (2026-09-17) |
 | M1 Test signal generator | ✅ 1 Hz LED blink confirmed |
 | M2 Naive capture baseline | ✅ 396 kB/s |
 | M3 DMA capture | ✅ 0 drops at 10 MSa/s (cyclic DMA) |
@@ -249,7 +249,7 @@ tests/              host unit tests (ctest)
 
 - [ ] Run the live `uart-listen.sh` on the Pi. It's built but untested on hardware.
 - [ ] Confirm the PulseView visual decode of `uart.sr` (M6).
-- [ ] Confirm the stock `piopwm 4` example runs cleanly (M0).
+- [x] Confirm the stock `piopwm` example runs cleanly (M0, 2026-09-17, on GPIO 20).
 - [ ] ESP32 UART test **through a 74LVC245 buffer** with a shared GND.
 - [x] Long-run confirmation of the 1/2/4-channel ceilings (2026-09-17).
 - [ ] Optional: M8 (RLE, pre-trigger buffer), or a PulseView live driver.

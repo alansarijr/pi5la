@@ -62,7 +62,7 @@ See `PROJECT_SUMMARY.md` and `README.md` for details and all measurements.
    Test: jumper pin 8 → pin 3, run `uart-listen.sh` in one terminal, then
    `printf 'hello\r\n' > /dev/ttyAMA0` in another.
 2. **PulseView visual check** of `uart.sr` (M6).
-3. **M0:** confirm `~/utils/build/piolib/examples/piopwm 4` ran without errors.
+3. ~~M0~~ Done 2026-09-17: `piopwm 20` ran without errors, PWM seen on GPIO 2 via the loopback.
 4. **ESP32:** I want to sniff its UART (115200 baud, powered from my PC). **It needs a
    74LVC245 buffer and a shared GND**, which I don't have wired yet.
 5. ~~Open question: ratesweep no-signal rows~~ Done: `status=nosignal`, empty `violation_pct`

@@ -7,7 +7,7 @@ real protocols, and what is still being tested.
 - **Hardware:** Raspberry Pi 5, 8 GB, Raspberry Pi OS Bookworm, kernel
   `6.18.50+rpt-rpi-2712`, RP1 firmware `23fca1cd…` (op count 33).
 - **Channels:** GPIO 2–9 (physical pins 3, 5, 7, 29, 31, 26, 24, 21).
-- **Details and raw measurements:** `README.md` (milestones M0–M7).
+- **Details and raw measurements:** `README.md` (milestones M0–M7, all verified).
 
 All measurements are from 2026-09-16 unless dated otherwise. Items marked
 *unmeasured* are estimates.
@@ -58,6 +58,7 @@ All measurements are from 2026-09-16 unless dated otherwise. Items marked
 
 | Test | Result |
 |---|---|
+| Toolchain (M0) | Stock `piopwm` example loads and runs on PIO without errors; output seen through the loopback |
 | Generator (M1) | 1 Hz LED blink, `actual 1.000000 Hz` |
 | Bit map (M4) | Channel k at word bits k, k+8, k+16, k+24 on all 8 channels |
 | Correctness (M4) | 100 kHz at 10 MSa/s, 16 M samples: 320 000 transitions, every run exactly 50 samples, other channels constant |
@@ -231,12 +232,15 @@ Every run on channel 0 was exactly 25 samples.
 3 GB of samples); 66.7 MB/s is not (9 / 20); 100 MB/s fails outright. The
 edge lies between 50 and 66.7 MB/s; integer dividers can't test in between.
 
+**Decision (2026-09-17):** 50 MB/s is the documented limit. Fractional-divider
+tests between 50 and 66.7 MB/s were not pursued: they would gain at most ~30 %
+with uneven sample spacing, close to the drop edge.
+
 ---
 
 ## 6. Still open
 
 - Live `pi5la --stream` / `uart-listen.sh` on the Pi (built, not yet run).
 - PulseView visual check of `uart.sr`.
-- Confirm the stock `piopwm 4` example (M0).
 - ESP32 UART at 115200 through a 74LVC245 buffer with a shared GND.
 - Not started by agreement: M8 (RLE, pre-trigger buffer).
