@@ -84,7 +84,13 @@ if(NOT PI5LA_TESTS_ONLY)
     add_executable(fdebugtest tools/fdebugtest.c)
     target_link_libraries(fdebugtest PRIVATE pi5la_hw)
 
+    # Live UART listener script, placed next to pi5la in the build directory.
+    file(COPY tools/uart-listen.sh DESTINATION ${CMAKE_CURRENT_BINARY_DIR}
+        FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
+                         WORLD_READ WORLD_EXECUTE)
+
     install(TARGETS pi5la ratesweep bitprobe fdebugtest RUNTIME DESTINATION bin)
+    install(PROGRAMS tools/uart-listen.sh DESTINATION bin RENAME uart-listen)
 endif()
 
 enable_testing()

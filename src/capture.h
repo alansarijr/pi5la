@@ -53,6 +53,30 @@ typedef struct {
 /* Returns 0 on success, -1 on error (message on stderr). */
 int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res);
 
+/*
+ * Called with each completed DMA period of packed FIFO words, in order.
+ * Return 0 to keep streaming, non-zero to stop.
+ */
+typedef int (*capture_sink_t)(const uint32_t *words, size_t n_words, void *ctx);
+
+typedef struct {
+    double rate_hz;
+    uint64_t bytes;             /* packed bytes delivered to the sink */
+    double total_s;             /* SM enable -> last period */
+    uint64_t stall_events;      /* periods with RXSTALL set */
+    bool overflow;              /* DMA ring wrapped: sink too slow, stream stopped */
+    bool sink_stopped;          /* sink returned non-zero */
+    bool interrupted;           /* cfg->stop was set */
+} capture_stream_result_t;
+
+/*
+ * Capture continuously (cyclic DMA, no gaps) until cfg->stop is set, the sink
+ * asks to stop, or the ring overflows. cfg->samples is ignored.
+ * Returns 0 on a clean stop, -1 on error (message on stderr).
+ */
+int capture_stream(PIO pio, const capture_config_t *cfg, capture_sink_t sink, void *ctx,
+                   capture_stream_result_t *res);
+
 void capture_result_free(capture_result_t *res);
 
 /* Checks progbuild output against the pioasm-generated la8 / la8_trig programs. */

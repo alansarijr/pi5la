@@ -95,7 +95,7 @@ static int run_dma(PIO pio, uint sm, int fd, const capture_config_t *cfg,
 
     while (got < total) {
         if (got + period > capacity_bytes) {
-            fprintf(stderr, "capture: internal error: buffer too small<NL>");
+            fprintf(stderr, "capture: internal error: buffer too small\n");
             return -1;
         }
         if (dmacyclic_read(fd, sm, (uint32_t)period, (uint8_t *)res->words + got)) {
@@ -107,7 +107,7 @@ static int run_dma(PIO pio, uint sm, int fd, const capture_config_t *cfg,
                 res->interrupted = true;
                 break;
             }
-            fprintf(stderr, "capture: DMA receive failed: %s<NL>", strerror(errno));
+            fprintf(stderr, "capture: DMA receive failed: %s\n", strerror(errno));
             return -1;
         }
         t_last = monotonic_s();
@@ -179,17 +179,28 @@ static int run_naive(PIO pio, uint sm, int fd, const capture_config_t *cfg,
     return 0;
 }
 
-int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
-{
-    pio_program_t program;
-    pio_sm_config c;
+/* PIO + DMA resources for one capture, shared by capture_run and capture_stream. */
+typedef struct {
     la_prog_t lp;
-    unsigned spw, k;
-    size_t capacity_bytes;
+    pio_program_t program;
     uint offset;
-    int sm, ret, fd;
+    int sm;
+    int fd;
+} capture_hw_t;
 
-    memset(res, 0, sizeof(*res));
+/*
+ * Validates cfg (except the sample count), loads the program, configures DMA
+ * (cyclic, when mode is DMA) and initialises the SM, left disabled.
+ * hw must stay at the same address until capture_hw_teardown().
+ */
+static int capture_hw_setup(PIO pio, const capture_config_t *cfg, capture_hw_t *hw)
+{
+    pio_sm_config c;
+    unsigned k;
+
+    memset(hw, 0, sizeof(*hw));
+    hw->sm = -1;
+    hw->fd = -1;
 
     if (!unpack_channels_valid(cfg->channels)) {
         fprintf(stderr, "capture: channels must be 1, 2, 4 or 8\n");
@@ -200,18 +211,100 @@ int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
                 cfg->base_gpio + cfg->channels - 1, CAPTURE_GPIO_COUNT - 1);
         return -1;
     }
-    if (cfg->samples == 0) {
-        fprintf(stderr, "capture: sample count must be > 0\n");
-        return -1;
-    }
     if (cfg->mode == CAPTURE_DMA && (cfg->dma_buf_bytes < 4 || cfg->dma_buf_bytes % 4)) {
         fprintf(stderr, "capture: DMA buffer size must be a non-zero multiple of 4\n");
         return -1;
     }
     if (!capture_selftest_programs())
         return -1;
-    if (!la_build_program(cfg->channels, cfg->trig, cfg->trig_pin, &lp)) {
+    if (!la_build_program(cfg->channels, cfg->trig, cfg->trig_pin, &hw->lp)) {
         fprintf(stderr, "capture: invalid trigger (pin must be < channels)\n");
+        return -1;
+    }
+
+    hw->program.instructions = hw->lp.instr;
+    hw->program.length = hw->lp.length;
+    hw->program.origin = -1;
+    hw->program.pio_version = 0;
+
+    hw->fd = fdebug_open();
+    if (hw->fd < 0) {
+        fprintf(stderr, "capture: opening /dev/pio0 for FDEBUG: %s\n", strerror(errno));
+        return -1;
+    }
+
+    hw->sm = pio_claim_unused_sm(pio, false);
+    if (hw->sm < 0) {
+        fprintf(stderr, "capture: no free PIO state machine\n");
+        fdebug_close(hw->fd);
+        return -1;
+    }
+    hw->offset = pio_add_program(pio, &hw->program);
+    if (hw->offset == PIO_ORIGIN_INVALID) {
+        fprintf(stderr, "capture: no PIO program space\n");
+        pio_sm_unclaim(pio, hw->sm);
+        fdebug_close(hw->fd);
+        return -1;
+    }
+
+    if (cfg->mode == CAPTURE_DMA &&
+        dmacyclic_config(hw->fd, (unsigned)hw->sm, cfg->dma_buf_bytes, CAPTURE_DMA_BUF_COUNT) < 0) {
+        fprintf(stderr, "capture: cyclic DMA config (%u x %u bytes) failed: %s\n",
+                CAPTURE_DMA_BUF_COUNT, cfg->dma_buf_bytes, strerror(errno));
+        pio_remove_program(pio, &hw->program, hw->offset);
+        pio_sm_unclaim(pio, hw->sm);
+        fdebug_close(hw->fd);
+        return -1;
+    }
+
+    for (k = 0; k < cfg->channels; k++)
+        pio_gpio_init(pio, cfg->base_gpio + k);
+    pio_sm_set_consecutive_pindirs(pio, hw->sm, cfg->base_gpio, cfg->channels, false);
+
+    c = pio_get_default_sm_config_for_pio(pio);
+    sm_config_set_wrap(&c, hw->offset + hw->lp.wrap_target, hw->offset + hw->lp.wrap);
+    sm_config_set_in_pins(&c, cfg->base_gpio);
+    sm_config_set_in_shift(&c, true, true, 32);
+    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
+    sm_config_set_clkdiv_int_frac(&c, cfg->div.div_int, cfg->div.div_frac);
+    pio_sm_init(pio, hw->sm, hw->offset, &c);
+
+    if (take_rxstall(hw->fd, (uint)hw->sm) < 0) {
+        pio_remove_program(pio, &hw->program, hw->offset);
+        pio_sm_unclaim(pio, hw->sm);
+        fdebug_close(hw->fd);
+        return -1;
+    }
+    return 0;
+}
+
+static void capture_hw_teardown(PIO pio, capture_hw_t *hw)
+{
+    pio_sm_set_enabled(pio, hw->sm, false);
+    pio_remove_program(pio, &hw->program, hw->offset);
+    pio_sm_unclaim(pio, hw->sm);
+    fdebug_close(hw->fd);
+}
+
+int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
+{
+    capture_hw_t hw;
+    unsigned spw;
+    size_t capacity_bytes;
+    int ret;
+
+    memset(res, 0, sizeof(*res));
+
+    if (cfg->samples == 0) {
+        fprintf(stderr, "capture: sample count must be > 0\n");
+        return -1;
+    }
+    if (!unpack_channels_valid(cfg->channels)) {
+        fprintf(stderr, "capture: channels must be 1, 2, 4 or 8\n");
+        return -1;
+    }
+    if (cfg->mode == CAPTURE_DMA && (cfg->dma_buf_bytes < 4 || cfg->dma_buf_bytes % 4)) {
+        fprintf(stderr, "capture: DMA buffer size must be a non-zero multiple of 4\n");
         return -1;
     }
 
@@ -229,66 +322,91 @@ int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
     }
     res->rate_hz = clkdiv_hz(cfg->div);
 
-    program.instructions = lp.instr;
-    program.length = lp.length;
-    program.origin = -1;
-    program.pio_version = 0;
-
-    fd = fdebug_open();
-    if (fd < 0) {
-        fprintf(stderr, "capture: opening /dev/pio0 for FDEBUG: %s\n", strerror(errno));
+    if (capture_hw_setup(pio, cfg, &hw))
         return -1;
-    }
 
-    sm = pio_claim_unused_sm(pio, false);
-    if (sm < 0) {
-        fprintf(stderr, "capture: no free PIO state machine\n");
-        fdebug_close(fd);
-        return -1;
-    }
-    offset = pio_add_program(pio, &program);
-    if (offset == PIO_ORIGIN_INVALID) {
-        fprintf(stderr, "capture: no PIO program space\n");
-        pio_sm_unclaim(pio, sm);
-        fdebug_close(fd);
-        return -1;
-    }
-
-    if (cfg->mode == CAPTURE_DMA &&
-        dmacyclic_config(fd, (unsigned)sm, cfg->dma_buf_bytes, CAPTURE_DMA_BUF_COUNT) < 0) {
-        fprintf(stderr, "capture: cyclic DMA config (%u x %u bytes) failed: %s\n",
-                CAPTURE_DMA_BUF_COUNT, cfg->dma_buf_bytes, strerror(errno));
-        pio_remove_program(pio, &program, offset);
-        pio_sm_unclaim(pio, sm);
-        fdebug_close(fd);
-        return -1;
-    }
-
-    for (k = 0; k < cfg->channels; k++)
-        pio_gpio_init(pio, cfg->base_gpio + k);
-    pio_sm_set_consecutive_pindirs(pio, sm, cfg->base_gpio, cfg->channels, false);
-
-    c = pio_get_default_sm_config_for_pio(pio);
-    sm_config_set_wrap(&c, offset + lp.wrap_target, offset + lp.wrap);
-    sm_config_set_in_pins(&c, cfg->base_gpio);
-    sm_config_set_in_shift(&c, true, true, 32);
-    sm_config_set_fifo_join(&c, PIO_FIFO_JOIN_RX);
-    sm_config_set_clkdiv_int_frac(&c, cfg->div.div_int, cfg->div.div_frac);
-    pio_sm_init(pio, sm, offset, &c);
-    if (take_rxstall(fd, (uint)sm) < 0)
-        ret = -1;
-    else if (cfg->mode == CAPTURE_DMA)
-        ret = run_dma(pio, (uint)sm, fd, cfg, res, capacity_bytes);
+    if (cfg->mode == CAPTURE_DMA)
+        ret = run_dma(pio, (uint)hw.sm, hw.fd, cfg, res, capacity_bytes);
     else
-        ret = run_naive(pio, (uint)sm, fd, cfg, res);
+        ret = run_naive(pio, (uint)hw.sm, hw.fd, cfg, res);
 
-    pio_sm_set_enabled(pio, sm, false);
-    pio_remove_program(pio, &program, offset);
-    pio_sm_unclaim(pio, sm);
-    fdebug_close(fd);
+    capture_hw_teardown(pio, &hw);
 
     if (ret == 0)
         finish_estimate(cfg, res);
+    return ret;
+}
+
+int capture_stream(PIO pio, const capture_config_t *cfg, capture_sink_t sink, void *ctx,
+                   capture_stream_result_t *res)
+{
+    size_t period = cfg->dma_buf_bytes;
+    capture_hw_t hw;
+    uint32_t *buf;
+    double t_enable, t_last = 0;
+    int stall, ret = 0;
+
+    memset(res, 0, sizeof(*res));
+
+    if (cfg->mode != CAPTURE_DMA) {
+        fprintf(stderr, "capture: streaming needs DMA mode\n");
+        return -1;
+    }
+    if (period < 4 || period % 4) {
+        fprintf(stderr, "capture: DMA buffer size must be a non-zero multiple of 4\n");
+        return -1;
+    }
+    buf = malloc(period);
+    if (!buf) {
+        fprintf(stderr, "capture: cannot allocate %zu bytes\n", period);
+        return -1;
+    }
+    res->rate_hz = clkdiv_hz(cfg->div);
+
+    if (capture_hw_setup(pio, cfg, &hw)) {
+        free(buf);
+        return -1;
+    }
+
+    pio_sm_set_enabled(pio, (uint)hw.sm, true);
+    t_enable = monotonic_s();
+
+    while (!stopped(cfg)) {
+        if (dmacyclic_read(hw.fd, (unsigned)hw.sm, (uint32_t)period, buf)) {
+            if (errno == EOVERFLOW) {
+                res->overflow = true;
+                break;
+            }
+            if (stopped(cfg))
+                break;
+            fprintf(stderr, "capture: DMA receive failed: %s\n", strerror(errno));
+            ret = -1;
+            break;
+        }
+        t_last = monotonic_s();
+        res->bytes += period;
+
+        stall = take_rxstall(hw.fd, (uint)hw.sm);
+        if (stall < 0) {
+            ret = -1;
+            break;
+        }
+        if (stall) {
+            res->stall_events++;
+            fprintf(stderr, "capture: RXSTALL at %.3f s: samples dropped\n", t_last - t_enable);
+        }
+
+        if (sink(buf, period / 4, ctx)) {
+            res->sink_stopped = true;
+            break;
+        }
+    }
+    if (stopped(cfg))
+        res->interrupted = true;
+    res->total_s = t_last > 0 ? t_last - t_enable : 0;
+
+    capture_hw_teardown(pio, &hw);
+    free(buf);
     return ret;
 }
 

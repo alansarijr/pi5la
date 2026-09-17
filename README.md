@@ -134,6 +134,7 @@ pi5la --rate 10M --samples 1000000 --out capture.sr
       [--trigger rising:0] [--mode dma|naive]
       [--generator 100k] [--raw words.bin] [--dma-buf 1048576]
 pi5la --generator 1 --generator-only
+pi5la --rate 2M --stream [--channels 8] [--trigger falling:0] | <decoder>
 ```
 
 | Option | Meaning |
@@ -149,6 +150,7 @@ pi5la --generator 1 --generator-only
 | `--generator` | Square wave on GPIO 20 during capture, for loopback self-test. |
 | `--generator-only` | Run only the generator until Ctrl-C (M1). |
 | `--dma-buf` | Cyclic DMA period size in bytes (the ring holds 4 periods). |
+| `--stream` | Capture until Ctrl-C and write samples to stdout as they arrive (1 byte per sample, channel N in bit N). Refuses to write to a terminal: pipe it into a decoder. |
 
 Exit status: `0` OK, `1` error, `2` dropped samples detected. Stats and the
 drop report go to stderr:
@@ -160,6 +162,35 @@ drop report go to stderr:
 - **estimated lost samples**: `rate × elapsed − samples received`, measured
   from the first buffer to the last. It's a wall-clock estimate that includes
   scheduling jitter, so it is reported but does **not** affect the exit code.
+
+### Live UART listening
+
+`uart-listen` (copied next to `pi5la` in the build directory) captures
+continuously with no gaps and decodes UART as bytes arrive, until Ctrl-C:
+
+```bash
+~/build-pi5la/uart-listen.sh                          # text, 115200 8N1, channel 0 (GPIO 2)
+~/build-pi5la/uart-listen.sh --hex                    # "sample-number: hex" per byte
+~/build-pi5la/uart-listen.sh --baud 9600 --channel 3 --rate 500k
+```
+
+It runs `pi5la --stream` into
+`sigrok-cli -I binary:numchannels=8:samplerate=<Hz> -i - -P uart:rx=<channel>:baudrate=<baud>`,
+so it needs `sigrok-cli` (`sudo apt install sigrok-cli`). The binary input
+names channels `0`–`7`, not `GPIO2`–`GPIO9`.
+
+sigrok's decoders run in Python and may not keep up with high sample rates.
+The default is 2 MSa/s (about 17 samples per bit at 115200). If the pipe
+can't keep up, the DMA ring overflows. pi5la then stops with
+`DMA ring overflow … Lower --rate` and exit code 2, so data is never dropped
+silently. RXSTALL events are reported live on stderr.
+
+Other decoders work the same way, for example I²C on channels 0 and 1:
+
+```bash
+pi5la --rate 4M --stream | sigrok-cli -I binary:numchannels=8:samplerate=4000000 -i - \
+    -P i2c:scl=0:sda=1 -A i2c
+```
 
 ---
 

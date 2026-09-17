@@ -34,6 +34,7 @@ static void usage(FILE *f)
         "             [--trigger rising|falling|high|low:N] [--mode dma|naive]\n"
         "             [--generator FREQ] [--dma-buf BYTES]\n"
         "       pi5la --generator FREQ --generator-only\n"
+        "       pi5la --rate RATE --stream [--channels N] [--trigger T:N] | sigrok-cli ...\n"
         "\n"
         "  --rate RATE        sample rate, suffix k/M (200 MHz / integer+1/256 divider)\n"
         "  --samples N        samples to capture (suffix k/M allowed)\n"
@@ -45,6 +46,9 @@ static void usage(FILE *f)
         "  --mode M           dma (default) or naive (M2 baseline)\n"
         "  --generator FREQ   square wave on GPIO %d while capturing (loopback self-test)\n"
         "  --generator-only   run the generator until Ctrl-C, no capture (M1)\n"
+        "  --stream           capture until Ctrl-C, writing samples to stdout as they\n"
+        "                     arrive (1 byte per sample, channel N in bit N); for\n"
+        "                     sigrok-cli -I binary:numchannels=N:samplerate=RATE -i -\n"
         "  --dma-buf BYTES    cyclic DMA period size, ring of %d periods (default %u)\n"
         "\n"
         "Exit status: 0 ok, 1 error, %d dropped samples detected.\n",
@@ -105,6 +109,52 @@ static void report(const capture_config_t *cfg, const capture_result_t *res, uin
         fprintf(stderr, "capture interrupted\n");
 }
 
+typedef struct {
+    unsigned channels;
+    uint8_t *buf;
+    size_t cap;
+    uint64_t samples;
+    bool write_failed;
+} stream_ctx_t;
+
+/* Unpacks one DMA period and writes it to stdout. Non-zero stops the stream. */
+static int stream_sink(const uint32_t *words, size_t n_words, void *arg)
+{
+    stream_ctx_t *ctx = arg;
+    size_t n = n_words * unpack_samples_per_word(ctx->channels);
+    size_t done = 0;
+
+    if (n > ctx->cap) {
+        uint8_t *nb = realloc(ctx->buf, n);
+
+        if (!nb) {
+            fprintf(stderr, "stream: cannot allocate %zu bytes\n", n);
+            return -1;
+        }
+        ctx->buf = nb;
+        ctx->cap = n;
+    }
+    unpack_words(words, n_words, ctx->channels, ctx->buf, n);
+
+    while (done < n) {
+        ssize_t w = write(STDOUT_FILENO, ctx->buf + done, n - done);
+
+        if (w < 0) {
+            if (errno == EINTR && !g_stop)
+                continue;
+            if (errno != EINTR) {
+                if (errno != EPIPE)
+                    fprintf(stderr, "stream: write to stdout failed: %s\n", strerror(errno));
+                ctx->write_failed = true;
+            }
+            return -1;
+        }
+        done += (size_t)w;
+    }
+    ctx->samples += n;
+    return 0;
+}
+
 static int check_dev_pio(void)
 {
     if (access("/dev/pio0", F_OK) != 0) {
@@ -120,7 +170,7 @@ static int check_dev_pio(void)
 
 int main(int argc, char **argv)
 {
-    enum { OPT_GEN_ONLY = 256, OPT_DMA_BUF, OPT_RAW };
+    enum { OPT_GEN_ONLY = 256, OPT_DMA_BUF, OPT_RAW, OPT_STREAM };
     static const struct option opts[] = {
         { "rate", required_argument, NULL, 'r' },
         { "samples", required_argument, NULL, 'n' },
@@ -132,6 +182,7 @@ int main(int argc, char **argv)
         { "mode", required_argument, NULL, 'm' },
         { "generator", required_argument, NULL, 'g' },
         { "generator-only", no_argument, NULL, OPT_GEN_ONLY },
+        { "stream", no_argument, NULL, OPT_STREAM },
         { "dma-buf", required_argument, NULL, OPT_DMA_BUF },
         { "help", no_argument, NULL, 'h' },
         { NULL, 0, NULL, 0 },
@@ -146,7 +197,8 @@ int main(int argc, char **argv)
     };
     const char *out_path = NULL, *raw_path = NULL;
     double rate = 0, gen_hz = 0;
-    bool have_rate = false, have_samples = false, gen_only = false;
+    bool have_rate = false, have_samples = false, gen_only = false, stream = false;
+    stream_ctx_t sctx = { 0 };
     capture_result_t res = { 0 };
     generator_t gen = { .sm = -1 };
     struct sigaction sa;
@@ -216,6 +268,9 @@ int main(int argc, char **argv)
         case OPT_GEN_ONLY:
             gen_only = true;
             break;
+        case OPT_STREAM:
+            stream = true;
+            break;
         case OPT_DMA_BUF:
             if (!parse_si_u64(optarg, &u) || u < 4 || u % 4 || u > UINT32_MAX) {
                 fprintf(stderr, "invalid --dma-buf '%s' (non-zero multiple of 4)\n", optarg);
@@ -242,7 +297,24 @@ int main(int argc, char **argv)
             return 1;
         }
     } else {
-        if (!have_rate || !have_samples || (!out_path && !raw_path)) {
+        if (stream) {
+            if (!have_rate) {
+                fprintf(stderr, "--stream needs --rate\n");
+                return 1;
+            }
+            if (have_samples || out_path || raw_path || cfg.mode != CAPTURE_DMA) {
+                fprintf(stderr, "--stream runs until Ctrl-C and writes to stdout: "
+                                "don't combine it with --samples, --out, --raw or --mode naive\n");
+                return 1;
+            }
+            if (isatty(STDOUT_FILENO)) {
+                fprintf(stderr, "--stream writes binary samples: pipe it into a decoder, e.g.\n"
+                                "  pi5la --rate 2M --stream | sigrok-cli -I "
+                                "binary:numchannels=8:samplerate=2000000 -i - "
+                                "-P uart:rx=0:baudrate=115200 -B uart=rx\n");
+                return 1;
+            }
+        } else if (!have_rate || !have_samples || (!out_path && !raw_path)) {
             usage(stderr);
             return 1;
         }
@@ -276,6 +348,8 @@ int main(int argc, char **argv)
     sigemptyset(&sa.sa_mask);
     sigaction(SIGINT, &sa, NULL);
     sigaction(SIGTERM, &sa, NULL);
+    /* A closed reader (e.g. sigrok-cli exiting) surfaces as EPIPE from write(). */
+    signal(SIGPIPE, SIG_IGN);
 
     pio = pio_open(0);
     if (PIO_IS_ERR(pio)) {
@@ -295,6 +369,28 @@ int main(int argc, char **argv)
         while (!g_stop)
             pause();
         exit_code = 0;
+        goto out;
+    }
+
+    if (stream) {
+        capture_stream_result_t sres;
+
+        sctx.channels = cfg.channels;
+        fprintf(stderr, "streaming %u ch at %.3f Hz on GPIO %u..%u until Ctrl-C "
+                        "(sigrok samplerate=%.0f)\n",
+                cfg.channels, clkdiv_hz(cfg.div), cfg.base_gpio,
+                cfg.base_gpio + cfg.channels - 1, clkdiv_hz(cfg.div));
+        if (capture_stream(pio, &cfg, stream_sink, &sctx, &sres))
+            goto out;
+        fprintf(stderr, "\nstreamed %" PRIu64 " samples in %.3f s, stall events: %" PRIu64 "\n",
+                sctx.samples, sres.total_s, sres.stall_events);
+        if (sres.overflow)
+            fprintf(stderr, "DMA ring overflow: the reader could not keep up. Lower --rate "
+                            "(or --channels) so the decoder keeps pace.\n");
+        if (sres.stall_events > 0 || sres.overflow)
+            exit_code = EXIT_DROPPED;
+        else
+            exit_code = sctx.write_failed && !sres.interrupted ? 1 : 0;
         goto out;
     }
 
@@ -347,6 +443,7 @@ out:
     if (gen.sm >= 0)
         generator_stop(&gen);
     free(samples);
+    free(sctx.buf);
     capture_result_free(&res);
     pio_close(pio);
     return exit_code;
