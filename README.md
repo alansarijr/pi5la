@@ -5,9 +5,11 @@ Pi 5's RP1 southbridge. It writes sigrok `.sr` files that open in PulseView.
 
 Target: 10 MSa/s on 8 channels, sustained, with **zero dropped samples**.
 
-> **Status:** this code has been compiled and unit-tested on x86 Linux only.
-> None of the milestones below has been checked on Pi 5 hardware yet. Every
-> "Result" field is **TBD** until it has been measured on the Pi.
+> **Status:** M1–M7 are verified on Pi 5 hardware (2026-09-16/17). The spec
+> target is met, and the reliable ceiling is 50 MB/s of packed data: 8 ch at
+> 50 MSa/s, 4 ch at 100 MSa/s, 1–2 ch at 200 MSa/s. Still unverified on the Pi:
+> the stock `piopwm` check (M0) and live `--stream` / `uart-listen`. M8 is not
+> implemented. Findings are collected in `REPORT.md`.
 
 ---
 
@@ -40,9 +42,8 @@ target GND ───────────────────────
 
 ## Build (M0)
 
-The commands below are the intended M0 sequence. They have **not** been run on
-a Pi yet. Once you have run them, replace this note with the exact commands
-you used and their output.
+These are the commands used to build pi5la on the development Pi 5. Only the
+stock `piopwm` example check below has not been explicitly confirmed.
 
 ### 1. Prerequisites
 
@@ -236,6 +237,70 @@ pi5la --rate 4M --stream | sigrok-cli -I binary:numchannels=8:samplerate=4000000
   transfers timing out on 6.12) was fixed in the kernel. Issue #124 (DMA reads
   can't be terminated early) is still open.
 
+### Capture limits
+
+Figures come from the M5 rate sweep unless marked *unmeasured*.
+
+**Throughput, not sampling, sets the ceiling.** PIO samples at up to
+200 MSa/s (200 MHz clock, divider 1) whatever the channel count. The limit is
+moving the data from RP1 to Linux: each channel adds one bit per sample, packed
+32/N samples per word, through the FIFO, DMA ring, PCIe and pi5la's reads. All
+measured ceilings land on the same bit rate:
+
+| Channels | Ceiling | Bits/s | Words/s | Confidence |
+|---|---|---|---|---|
+| 8 | 50 MSa/s | 400 Mbit/s | 12.5 M | 200 M samples, 0 drops |
+| 4 | 100 MSa/s | 400 Mbit/s | 12.5 M | 400 M samples, 0 drops |
+| 2 | 200 MSa/s | 400 Mbit/s | 12.5 M | 800 M samples, 0 drops |
+| 1 | 200 MSa/s | 200 Mbit/s | 6.25 M | 1600 M samples, 0 drops; PIO clock limit |
+
+So fewer channels buy a higher rate: capture only the signals you need. Which
+stage sets the ~400 Mbit/s limit (DMA refill, PCIe, or userspace copy) has not
+been isolated; the drop counters only say that data was lost.
+
+**Protocols.** Decoding wants at least 4 samples per bit or clock period;
+10 is comfortable. So the usable clock is about rate/10 (safe) to rate/4.
+
+| Protocol | Typical speed | Verdict |
+|---|---|---|
+| UART | up to ~3 Mbaud | yes; 115200 needs only 1–2 MSa/s |
+| I²C | 100 k / 400 k / 1 M | yes, at 10 MSa/s |
+| 1-Wire, WS2812 | ≤ 800 kHz | yes |
+| CAN / CAN-FD (logic side) | 1 / 5 Mbit | yes |
+| SWD / JTAG | usually ≤ 4 MHz | yes |
+| SPI | clock-dependent | ~5 MHz at 8 ch; ~10 MHz at 4 ch; 10–25 MHz marginal |
+| Flash SPI 40/80 MHz, SDIO, USB, Ethernet, HDMI, DDR | too fast or differential | no |
+
+**Other limits.**
+- *Live decoding (unmeasured).* `uart-listen` pipes into sigrok's Python
+  decoders, which likely fall well behind 50 MSa/s; hence the 2M default.
+  Capture to a file and decode afterwards for high rates.
+- *Recording length (unmeasured).* One byte per sample is 50 MB/s at
+  50 MSa/s; SD card write speed and free space cap the duration. Use a lower
+  rate or the trigger for long sessions.
+- *Electrical.* 3.3 V inputs only (5 V goes through the 74LVC245). Digital
+  levels only; timing resolution is one sample (20 ns at 50 MSa/s). Loose
+  jumpers distort signals above a few MHz. GPIO 2 and 3 (channels 0 and 1)
+  have 1.8 kΩ on-board pull-ups, which can load a weak unbuffered signal.
+- *Channels.* 8 by design.
+
+### Why a Pi 5 and not a Pi 4
+
+The Pi 4 has no RP1 and no PIO. Its GPIOs sit on the BCM2711 SoC, so sampling
+would be a CPU loop reading a GPIO register. Linux interrupts and scheduling
+pause that loop, so samples are unevenly spaced, gaps corrupt decoded bytes,
+and drops are hard to detect. Expected rates are kHz to low MSa/s
+(*unmeasured*); DMA-timed tools such as pigpio target kHz signals.
+
+| | Pi 5 (RP1 PIO) | Pi 4 (software polling) |
+|---|---|---|
+| Sample timing | hardware clock, exact | loop timing, jittery |
+| Dropped samples | detected; 0 at 50 MSa/s × 8 ch | likely, hard to detect |
+| Practical rate | 50–200 MSa/s | kHz to low MSa/s (estimate) |
+
+Beyond ~400 Mbit/s the next step is a dedicated FPGA + USB 3 analyzer
+(DSLogic, Saleae), not another Pi.
+
 ---
 
 ## Milestones
@@ -331,7 +396,10 @@ Offline analysis of a `--raw` file: `bitprobe --raw-in dma.bin --channels 8`.
 ```bash
 ratesweep --out ratesweep.csv            # jumper GPIO 20 -> GPIO 2
 ```
-Columns: `channels,sample_rate,samples_captured,violations,violation_pct`.
+Columns: `channels,sample_rate,samples_captured,violations,violation_pct,stalls,status`.
+`status` is `ok`, `violations` (any violation, stall or ring overflow) or
+`nosignal` (no runs; `violation_pct` is then empty). The 2026-09-16 CSVs below
+predate the `stalls` and `status` columns.
 Only integer dividers are swept (200 MHz / {100,40,20,10,8,5,4,2,1}). The
 generator is locked to the capture clock with a 25-sample half period.
 **Result:** PASS (2026-09-16). **Measured ceiling at 8 channels: 50 MSa/s
@@ -362,7 +430,62 @@ confirmation run followed:
 | 50 MSa/s | 200 M | 4 s | **0** | **0** |
 | 66.7 MSa/s | 200 M | 3 s | 1 | 1 |
 
-The 1, 2 and 4-channel ceilings above come from the short runs only.
+Long confirmation of the other channel counts (2026-09-17), same jumper,
+about 200 MB of packed data each. CSVs: `long-4ch.csv`, `long-2ch.csv`,
+`long-1ch.csv` on the Pi.
+
+| Command | Samples | Duration | Violations | Stalls | Status |
+|---|---|---|---|---|---|
+| `ratesweep --channels 4 --dividers 2 --samples 400M` (100 MSa/s) | 400 M | 4 s | **0** | **0** | ok |
+| `ratesweep --channels 2 --dividers 1 --samples 800M` (200 MSa/s) | 800 M | 4 s | **0** | **0** | ok |
+| `ratesweep --channels 1 --dividers 1 --samples 1600M` (200 MSa/s) | 1600 M | 8 s | **0** | **0** | ok |
+
+Every run on channel 0 was exactly 25 samples (run min/max 25/25), so no
+sample was lost.
+
+#### Pushing past 50 MB/s (2026-09-17)
+
+Same jumper. Can larger DMA periods (`--dma-buf`) lift the ceiling?
+
+**DMA memory.** `CmaTotal: 65536 kB`, `CmaFree: 55296 kB`. The ring is
+4 periods, so 4 × 16 MiB (64 MB) fails with `Cannot allocate memory`; the
+largest ring that fits is 4 × 8 MiB.
+
+**100 MB/s is a hard limit.** With 4 MiB periods, 8 ch at 100 MSa/s gave
+48 stalls and 82.3 % violations, and 4 ch at 200 MSa/s gave 48 stalls and
+55.8 % violations: a stall in nearly every period.
+
+**66.7 MB/s is marginal at every period size.** 8 ch at 66.7 MSa/s,
+200 M samples, repeated 5 times per period size:
+
+| `--dma-buf` | Clean runs | Stalls per run |
+|---|---|---|
+| 1 MiB | 3 / 5 | 0, 3, 4, 0, 0 |
+| 2 MiB | 0 / 5 | 2, 1, 2, 1, 1 |
+| 4 MiB | 3 / 5 | 0, 1, 2, 0, 0 |
+| 8 MiB | 3 / 5 | 0, 0, 3, 0, 1 |
+
+No period size is reliable, and a single clean run proves nothing (the first
+4 MiB run was clean by luck). Losses are rare but real: 1–4 stalls in 200 M
+samples. One 4 MiB run had a stall with 0 violations (the lost samples didn't
+break a run), which the stall counter still caught.
+
+**Repeatability at 50 MB/s.** The same 5-run standard applied to the proven
+ceilings, default 1 MiB periods:
+
+| Channels | Rate | Samples per run | Clean runs | Stalls |
+|---|---|---|---|---|
+| 8 | 50 MSa/s | 200 M | **5 / 5** | 0 in every run |
+| 4 | 100 MSa/s | 400 M | **5 / 5** | 0 in every run |
+| 2 | 200 MSa/s | 800 M | **5 / 5** | 0 in every run |
+
+Every run on channel 0 was exactly 25 samples.
+
+**Conclusion:** 50 MB/s of packed data is reliable (15 / 15 clean runs,
+3 GB of samples); 66.7 MB/s is not (9 / 20); 100 MB/s fails outright. The
+edge lies between 50 and 66.7 MB/s; integer dividers can't test in between.
+
+
 
 Note: a first sweep had the jumper on the wrong pin. Every row then read
 `violations=0, violation_pct=100` (no runs found = no signal).

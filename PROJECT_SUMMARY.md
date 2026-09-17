@@ -6,6 +6,7 @@ open in PulseView, and can listen to a UART live.
 
 - **Spec:** `../SPECS.md`
 - **Detailed build steps and measurements:** `README.md`
+- **Findings report:** `REPORT.md`
 
 ---
 
@@ -16,8 +17,8 @@ open in PulseView, and can listen to a UART live.
 | Goal from the spec | 10 MSa/s, 8 channels, zero dropped samples |
 | **Achieved at 10 MSa/s** | **0 dropped samples**, 10.0 MB/s, byte-exact UART decode |
 | **Sustained ceiling, 8 channels** | **50 MSa/s**, confirmed over 200 M samples (4 s) |
-| Ceiling, 4 channels | 100 MSa/s (short runs only) |
-| Ceiling, 1 and 2 channels | 200 MSa/s, the hardware maximum (short runs only) |
+| Sustained ceiling, 4 channels | 100 MSa/s, confirmed over 400 M samples |
+| Sustained ceiling, 1 and 2 channels | 200 MSa/s, the hardware maximum, confirmed over 1600 M / 800 M samples |
 | Naive baseline (one read per word) | 396 kB/s, about 25× slower than DMA |
 | Hardware trigger | Works: blocks on an idle line, starts at the edge |
 | UART decode (115200 baud) | 8000 bytes decoded exactly (`cmp` → MATCH) |
@@ -31,7 +32,7 @@ open in PulseView, and can listen to a UART live.
 | M2 Naive capture baseline | ✅ 396 kB/s |
 | M3 DMA capture | ✅ 0 drops at 10 MSa/s (cyclic DMA) |
 | M4 Bit order / correctness | ✅ all 8 channels verified |
-| M5 Rate sweep | ✅ 50 MSa/s at 8 channels |
+| M5 Rate sweep | ✅ 50 / 100 / 200 / 200 MSa/s at 8 / 4 / 2 / 1 channels, all long-run confirmed |
 | M6 sigrok output / UART | ✅ decode is byte-exact. The PulseView visual check and the ESP32 test are still open |
 | M7 Hardware trigger | ✅ |
 | M8 RLE / pre-trigger | Not started (skipped by agreement) |
@@ -250,5 +251,5 @@ tests/              host unit tests (ctest)
 - [ ] Confirm the PulseView visual decode of `uart.sr` (M6).
 - [ ] Confirm the stock `piopwm 4` example runs cleanly (M0).
 - [ ] ESP32 UART test **through a 74LVC245 buffer** with a shared GND.
-- [ ] Optional: long-run confirmation of the 1/2/4-channel ceilings.
+- [x] Long-run confirmation of the 1/2/4-channel ceilings (2026-09-17).
 - [ ] Optional: M8 (RLE, pre-trigger buffer), or a PulseView live driver.

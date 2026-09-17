@@ -50,7 +50,8 @@ See `PROJECT_SUMMARY.md` and `README.md` for details and all measurements.
 - **M2:** naive capture, 396 kB/s.
 - **M3:** cyclic DMA, 0 drops at 10 MSa/s, 10 MB/s.
 - **M4:** bit map on all 8 channels.
-- **M5:** 50 MSa/s sustained at 8 channels; 1/2/4-channel ceilings from short runs only.
+- **M5:** sustained ceilings confirmed with long runs: 50 / 100 / 200 / 200 MSa/s at 8 / 4 / 2 / 1 channels
+  (1/2/4-ch confirmed 2026-09-17). `ratesweep` CSV now has `stalls` and `status` (`ok`/`violations`/`nosignal`).
 - **M7:** trigger.
 - **M6:** UART loopback decoded byte-exact with sigrok-cli.
 
@@ -64,9 +65,8 @@ See `PROJECT_SUMMARY.md` and `README.md` for details and all measurements.
 3. **M0:** confirm `~/utils/build/piolib/examples/piopwm 4` ran without errors.
 4. **ESP32:** I want to sniff its UART (115200 baud, powered from my PC). **It needs a
    74LVC245 buffer and a shared GND**, which I don't have wired yet.
-5. **Open question:** in `ratesweep`, a row with no signal prints
-   `violations=0, violation_pct=100`, which is misleading. You offered to mark such rows
-   (e.g. `nosignal`); I haven't answered.
+5. ~~Open question: ratesweep no-signal rows~~ Done: `status=nosignal`, empty `violation_pct`
+   (`status=ok` seen on the Pi 2026-09-17; the `nosignal` path not yet seen on hardware).
 
 ## Key technical decisions (and why)
 
@@ -100,6 +100,9 @@ See `PROJECT_SUMMARY.md` and `README.md` for details and all measurements.
   - GND = pins 6, 9, 39, and others.
 - **Idle levels:** GPIO 2–8 high (pull-ups), GPIO 9 low. An undriven GPIO 20 on a jumper
   idles high.
+- **CMA pool is 64 MB** (`CmaTotal 65536 kB`): the largest DMA ring is 4 × 8 MiB.
+  66.7 MB/s packed is unreliable at every `--dma-buf` (≤3/5 clean); 100 MB/s fails outright.
+  50 MB/s is reliable: 8ch@50M, 4ch@100M, 2ch@200M each 5/5 clean (2026-09-17).
 - **RP1 PIO clock is 200 MHz:** rate = 200 MHz / divider (int + frac/256). Integer
   dividers avoid jitter.
 - **A capture of all `0x7f7f7f7f` words** means no signal reached any channel: check the

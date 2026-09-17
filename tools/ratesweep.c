@@ -7,6 +7,10 @@
  * capture pin (channel 0). Any run on channel 0 whose length is not `half`
  * is a period violation.
  *
+ * CSV status: "ok" (0 violations, no stalls or ring overflow), "violations"
+ * (any of those) or "nosignal" (no runs at all: check the jumper).
+ * violation_pct is empty on nosignal rows.
+ *
  * Only integer dividers are swept: fractional dividers add sampling jitter
  * that would show up as violations unrelated to throughput.
  */
@@ -153,7 +157,7 @@ int main(int argc, char **argv)
         pio_close(pio);
         return 1;
     }
-    fprintf(csv, "channels,sample_rate,samples_captured,violations,violation_pct\n");
+    fprintf(csv, "channels,sample_rate,samples_captured,violations,violation_pct,stalls,status\n");
 
     for (ci = 0; ci < n_chans && !g_stop; ci++) {
         for (di = 0; di < n_divs && !g_stop; di++) {
@@ -174,7 +178,8 @@ int main(int argc, char **argv)
             run_stats_t st;
             uint64_t got;
             uint8_t *buf;
-            double pct;
+            const char *status;
+            char pct_str[32];
 
             if (half * divs[di] > 65535) {
                 fprintf(stderr, "skip ch=%u div=%" PRIu64 ": generator divider %" PRIu64
@@ -214,20 +219,30 @@ int main(int argc, char **argv)
             analyze_runs(buf, got, 0, half, &st);
             free(buf);
 
-            pct = st.runs ? 100.0 * st.violations / st.runs : 100.0;
-            fprintf(csv, "%u,%.0f,%" PRIu64 ",%" PRIu64 ",%.6f\n", ch, res.rate_hz, got,
-                    st.violations, pct);
+            if (st.runs == 0)
+                status = "nosignal";
+            else if (st.violations || res.stall_events || res.overflow)
+                status = "violations";
+            else
+                status = "ok";
+
+            pct_str[0] = '\0';
+            if (st.runs)
+                snprintf(pct_str, sizeof(pct_str), "%.6f", 100.0 * st.violations / st.runs);
+            fprintf(csv, "%u,%.0f,%" PRIu64 ",%" PRIu64 ",%s,%" PRIu64 ",%s\n", ch, res.rate_hz,
+                    got, st.violations, pct_str, res.stall_events, status);
             fflush(csv);
 
             fprintf(stderr,
                     "ch=%u rate=%.0f samples=%" PRIu64 " runs=%" PRIu64 " violations=%" PRIu64
-                    " (%.4f%%) run min/max=%" PRIu64 "/%" PRIu64 " stalls=%" PRIu64 "%s\n",
-                    ch, res.rate_hz, got, st.runs, st.violations, pct, st.min_run, st.max_run,
-                    res.stall_events,
+                    " (%s%%) run min/max=%" PRIu64 "/%" PRIu64 " stalls=%" PRIu64
+                    " status=%s%s\n",
+                    ch, res.rate_hz, got, st.runs, st.violations, st.runs ? pct_str : "-",
+                    st.min_run, st.max_run, res.stall_events, status,
                     res.overflow ? "  DMA RING OVERFLOW"
                                  : (st.runs == 0 ? "  NO SIGNAL: check jumper" : ""));
 
-            if (st.runs > 0 && st.violations == 0 && res.rate_hz > best[ch])
+            if (strcmp(status, "ok") == 0 && res.rate_hz > best[ch])
                 best[ch] = res.rate_hz;
             capture_result_free(&res);
         }
