@@ -206,6 +206,17 @@ It runs `pi5la --stream` into
 so it needs `sigrok-cli` (`sudo apt install sigrok-cli`). The binary input
 names channels `0`–`7`, not `GPIO2`–`GPIO9`.
 
+**Verified on the Pi (2026-09-19)**, UART loopback jumper pin 8 → pin 3:
+
+```bash
+( sleep 3; printf 'hello live\r\n' > /dev/ttyAMA0 ) & timeout 8 ./uart-listen.sh
+```
+
+printed `hello live` as it arrived, streaming 15 728 640 samples in 7.865 s
+with 0 stall events. `--idle-stop` was confirmed on the same wiring:
+`pi5la --rate 2M --duration 60s --idle-stop 1s --out uart_idle.sr` ended by
+itself 4.196 s in, exit 0, and sigrok decoded the line byte-exact.
+
 sigrok's decoders run in Python and may not keep up with high sample rates.
 The default is 2 MSa/s (about 17 samples per bit at 115200). If the pipe
 can't keep up, the DMA ring overflows. pi5la then stops with

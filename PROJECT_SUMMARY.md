@@ -36,7 +36,7 @@ open in PulseView, and can listen to a UART live.
 | M6 sigrok output / UART | ✅ decode is byte-exact. The PulseView visual check and the ESP32 test are still open |
 | M7 Hardware trigger | ✅ |
 | M8 RLE / pre-trigger | Not started (skipped by agreement) |
-| Extra: live UART listening | Built and compile-tested. **Not yet run on the Pi** |
+| Extra: live UART listening | ✅ verified on the Pi (2026-09-19): text decoded live, 0 stalls |
 | Extra: `--duration` / `--idle-stop` | ✅ verified on the Pi (2026-09-19): capture stops 1 s after the signal ends |
 
 ---
@@ -248,7 +248,8 @@ tests/              host unit tests (ctest)
 
 ## 7. Still to do
 
-- [ ] Run the live `uart-listen.sh` on the Pi. It's built but untested on hardware.
+- [x] Run the live `uart-listen.sh` on the Pi (2026-09-19): decoded `hello live` as it arrived.
+- [x] `--duration` and `--idle-stop` (2026-09-19): capture ends itself when the line goes quiet.
 - [ ] Confirm the PulseView visual decode of `uart.sr` (M6).
 - [x] Confirm the stock `piopwm` example runs cleanly (M0, 2026-09-17, on GPIO 20).
 - [ ] ESP32 UART test **through a 74LVC245 buffer** with a shared GND.

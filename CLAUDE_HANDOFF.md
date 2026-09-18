@@ -42,8 +42,8 @@ Paste this into a new Claude chat, or attach it, to continue the project.
 
 ## Current state
 
-The latest commit is `89f529e`, "Add --stream mode and uart-listen live UART sniffer".
-See `PROJECT_SUMMARY.md` and `README.md` for details and all measurements.
+The latest commit adds `--duration` / `--idle-stop`. See `REPORT.md` for the findings,
+`PROJECT_SUMMARY.md` for the overview, and `README.md` for every measurement.
 
 **Verified on the Pi:**
 - **M1:** generator.
@@ -54,26 +54,23 @@ See `PROJECT_SUMMARY.md` and `README.md` for details and all measurements.
   (1/2/4-ch confirmed 2026-09-17). `ratesweep` CSV now has `stalls` and `status` (`ok`/`violations`/`nosignal`).
 - **M7:** trigger.
 - **M6:** UART loopback decoded byte-exact with sigrok-cli.
+- **M0:** stock `piopwm` example (2026-09-17).
+- **Live `--stream` / `uart-listen.sh`, `--duration`, `--idle-stop`** (2026-09-19).
 
 **Not yet verified:**
-1. **`pi5la --stream` and `tools/uart-listen.sh`**, the live UART listener. They compile
-   and pass argument-handling checks in WSL, but **have never run on the Pi**. The Pi's
-   copy may be older than `89f529e`, so the first step is to copy and rebuild.
-   Test: jumper pin 8 → pin 3, run `uart-listen.sh` in one terminal, then
-   `printf 'hello\r\n' > /dev/ttyAMA0` in another.
-   **Wiring caveat (2026-09-19):** a whole session was lost to a jumper whose pin-8 end
-   was never in pin 8. A pull-up makes GPIO 2 read `hi` either way, so check with
-   `pinctrl set 2 ip pd` *and* by watching real traffic:
-   `stty -F /dev/ttyAMA0 300 raw -echo` then sending NULs while polling `pinctrl lev 2,14`.
-   Both columns must move together.
+1. ~~`pi5la --stream` / `uart-listen.sh`~~ Done 2026-09-19: decoded `hello live` as it
+   arrived (15.7 M samples at 2 MSa/s, 0 stalls). `--duration` / `--idle-stop` verified on
+   the same wiring.
+   **Wiring caveat:** a session was lost to a jumper whose pin-8 end was never in pin 8.
+   A pull-up makes GPIO 2 read `hi` either way, so check against real traffic:
+   `stty -F /dev/ttyAMA0 300 raw -echo`, send NULs, and poll `pinctrl lev 2,14` --
+   both columns must move together. Pin 8 is the 4th hole of the even row from the
+   USB-C end; the 1st and 2nd holes of that row are 5 V and must never be used.
 2. **PulseView visual check** of `uart.sr` (M6).
-2b. **`--duration` / `--idle-stop`:** done 2026-09-19, verified with the generator
-   (jumper pin 38 → pin 3): capture ended itself 1 s after the signal stopped, exit 0.
-3. ~~M0~~ Done 2026-09-17: `piopwm 20` ran without errors, PWM seen on GPIO 2 via the loopback.
-4. **ESP32:** I want to sniff its UART (115200 baud, powered from my PC). **It needs a
+3. **ESP32:** I want to sniff its UART (115200 baud, powered from my PC). **It needs a
    74LVC245 buffer and a shared GND**, which I don't have wired yet.
-5. ~~Open question: ratesweep no-signal rows~~ Done: `status=nosignal`, empty `violation_pct`
-   (`status=ok` seen on the Pi 2026-09-17; the `nosignal` path not yet seen on hardware).
+4. `ratesweep` `status=nosignal` rows: the code path has not been seen on hardware
+   (every run so far was `status=ok`).
 
 ## Key technical decisions (and why)
 
@@ -94,6 +91,9 @@ See `PROJECT_SUMMARY.md` and `README.md` for details and all measurements.
 - **Live mode:** `--stream` writes one byte per sample to stdout. `uart-listen.sh` pipes
   it into `sigrok-cli -I binary:numchannels=8:samplerate=<Hz> -i -`. In that input,
   channels are named `0`–`7`, not `GPIO2`.
+- **Auto-stop:** `--idle-stop T` scans each DMA period for a word that isn't the idle
+  level repeated (`src/idle.c`), waits for the first change keeping ~1 period of lead-in,
+  then stops after T without one. Detection lags by up to one period.
 - **Exit codes:** `0` OK, `1` error, `2` dropped samples (RXSTALL or ring overflow). The
   wall-clock loss estimate is informational only.
 - M8 (RLE, pre-trigger) was skipped by agreement.
