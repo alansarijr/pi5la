@@ -37,6 +37,7 @@ open in PulseView, and can listen to a UART live.
 | M7 Hardware trigger | ✅ |
 | M8 RLE / pre-trigger | Not started (skipped by agreement) |
 | Extra: live UART listening | Built and compile-tested. **Not yet run on the Pi** |
+| Extra: `--duration` / `--idle-stop` | ✅ verified on the Pi (2026-09-19): capture stops 1 s after the signal ends |
 
 ---
 

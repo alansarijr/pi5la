@@ -61,7 +61,14 @@ See `PROJECT_SUMMARY.md` and `README.md` for details and all measurements.
    copy may be older than `89f529e`, so the first step is to copy and rebuild.
    Test: jumper pin 8 → pin 3, run `uart-listen.sh` in one terminal, then
    `printf 'hello\r\n' > /dev/ttyAMA0` in another.
+   **Wiring caveat (2026-09-19):** a whole session was lost to a jumper whose pin-8 end
+   was never in pin 8. A pull-up makes GPIO 2 read `hi` either way, so check with
+   `pinctrl set 2 ip pd` *and* by watching real traffic:
+   `stty -F /dev/ttyAMA0 300 raw -echo` then sending NULs while polling `pinctrl lev 2,14`.
+   Both columns must move together.
 2. **PulseView visual check** of `uart.sr` (M6).
+2b. **`--duration` / `--idle-stop`:** done 2026-09-19, verified with the generator
+   (jumper pin 38 → pin 3): capture ended itself 1 s after the signal stopped, exit 0.
 3. ~~M0~~ Done 2026-09-17: `piopwm 20` ran without errors, PWM seen on GPIO 2 via the loopback.
 4. **ESP32:** I want to sniff its UART (115200 baud, powered from my PC). **It needs a
    74LVC245 buffer and a shared GND**, which I don't have wired yet.

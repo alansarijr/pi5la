@@ -21,6 +21,7 @@ pkg_check_modules(LIBZIP REQUIRED IMPORTED_TARGET libzip)
 
 add_library(pi5la_core STATIC
     src/analyze.c
+    src/idle.c
     src/progbuild.c
     src/srzip.c
     src/unpack.c
@@ -94,7 +95,7 @@ if(NOT PI5LA_TESTS_ONLY)
 endif()
 
 enable_testing()
-foreach(t test_unpack test_srzip test_analyze test_progbuild test_util)
+foreach(t test_unpack test_srzip test_analyze test_progbuild test_util test_idle)
     add_executable(${t} tests/${t}.c)
     target_link_libraries(${t} PRIVATE pi5la_core)
     add_test(NAME ${t} COMMAND ${t})

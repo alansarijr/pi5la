@@ -130,6 +130,7 @@ To build and run only the unit tests on any Linux box, without piolib:
 
 ```
 pi5la --rate 10M --samples 1000000 --out capture.sr
+pi5la --rate 10M --duration 30s --idle-stop 1s --out capture.sr
       [--channels 8] [--base-gpio 2]
       [--trigger rising:0] [--mode dma|naive]
       [--generator 100k] [--raw words.bin] [--dma-buf 1048576]
@@ -140,7 +141,9 @@ pi5la --rate 2M --stream [--channels 8] [--trigger falling:0] | <decoder>
 | Option | Meaning |
 |---|---|
 | `--rate` | Sample rate with `k`/`M` suffix. Rate = 200 MHz / divider; the divider is an integer plus a 1/256 fraction. Fractional dividers add jitter, so pi5la prints a note when one is used. |
-| `--samples` | Number of samples to capture. |
+| `--samples` | Maximum number of samples to capture. The whole capture is held in RAM (about 2 bytes per sample at 8 channels) before the `.sr` file is written. Ctrl-C stops early and still saves what was captured. |
+| `--duration` | Maximum capture time instead of `--samples`: `500ms`, `10s`, `2m`, or plain seconds. Samples = rate × time. |
+| `--idle-stop` | Auto-stop, DMA file capture only. Waits for the first level change on any captured channel, keeping about one DMA period (up to two) of idle lead-in before it and discarding older idle data. After that, stops once this long passes with no change and keeps that much idle tail. `--samples`/`--duration` still cap the capture; the wait before the first change doesn't count towards it (Ctrl-C to abort). Checked once per DMA period, so stopping can lag by one period (1 MiB = 1 M samples at 8 channels, 1 s at 1 MSa/s). Every captured channel counts: tie unused buffer inputs to GND or they may never go idle. |
 | `--out` | sigrok `.sr` output. |
 | `--raw` | The packed 32-bit FIFO words, as received. Used for M4 analysis. |
 | `--channels` | 1, 2, 4 or 8. The PIO program is `in pins, N`, which packs 32/N samples per word. |
@@ -162,6 +165,30 @@ drop report go to stderr:
 - **estimated lost samples**: `rate × elapsed − samples received`, measured
   from the first buffer to the last. It's a wall-clock estimate that includes
   scheduling jitter, so it is reported but does **not** affect the exit code.
+
+### Stopping by itself
+
+`--duration` sets the maximum capture time and `--idle-stop` ends the capture
+once the line has been quiet for a while, so a recording of one transmission
+needs no Ctrl-C:
+
+```bash
+pi5la --rate 1M --duration 60s --idle-stop 1s --out capture.sr
+```
+
+**Verified on the Pi (2026-09-19)**, with the generator standing in for a
+device (jumper pin 38 → pin 3). A 1 kHz signal was started 3 s into the
+capture and stopped 3 s later:
+
+```bash
+( sleep 3; timeout 3 ./pi5la --generator 1k --generator-only ) & \
+    ./pi5la --rate 1M --duration 60s --idle-stop 1s --out idle.sr
+```
+
+The capture ended on its own after 7.341 s with exit code 0: 1 048 576 idle
+samples discarded while waiting, 5 952 852 samples kept (about two DMA periods
+of lead-in, the 3 s signal, and the 1 s idle tail), 0 stall events, and
+`idle stop: stopped after 1.000 s without a change`.
 
 ### Live UART listening
 

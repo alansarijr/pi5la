@@ -11,6 +11,7 @@
 
 #include "capture.h"
 #include "generator.h"
+#include "idle.h"
 #include "piolib.h"
 #include "srzip.h"
 #include "unpack.h"
@@ -29,15 +30,19 @@ static void on_signal(int sig)
 static void usage(FILE *f)
 {
     fprintf(f,
-        "usage: pi5la --rate RATE --samples N [--out FILE.sr] [--raw FILE]\n"
+        "usage: pi5la --rate RATE --samples N|--duration T [--out FILE.sr] [--raw FILE]\n"
         "             [--channels 1|2|4|8] [--base-gpio G]\n"
         "             [--trigger rising|falling|high|low:N] [--mode dma|naive]\n"
-        "             [--generator FREQ] [--dma-buf BYTES]\n"
+        "             [--generator FREQ] [--dma-buf BYTES] [--idle-stop T]\n"
         "       pi5la --generator FREQ --generator-only\n"
         "       pi5la --rate RATE --stream [--channels N] [--trigger T:N] | sigrok-cli ...\n"
         "\n"
         "  --rate RATE        sample rate, suffix k/M (200 MHz / integer+1/256 divider)\n"
-        "  --samples N        samples to capture (suffix k/M allowed)\n"
+        "  --samples N        maximum samples to capture (suffix k/M allowed)\n"
+        "  --duration T       maximum capture time instead of --samples (500ms, 10s, 2m)\n"
+        "  --idle-stop T      wait for the first change on any channel (keeping about one\n"
+        "                     DMA period before it), then stop after T without a change;\n"
+        "                     checked once per DMA period, so stopping can lag by a period\n"
         "  --out FILE.sr      write a sigrok session file\n"
         "  --raw FILE         write the packed 32-bit FIFO words (native byte order)\n"
         "  --channels N       1, 2, 4 or 8 (default 8)\n"
@@ -107,6 +112,17 @@ static void report(const capture_config_t *cfg, const capture_result_t *res, uin
         fprintf(stderr, "DMA ring overflow: host fell behind, capture stopped early\n");
     if (res->interrupted)
         fprintf(stderr, "capture interrupted\n");
+    if (cfg->idle_stop_s > 0) {
+        if (res->idle_discarded_bytes)
+            fprintf(stderr, "idle stop: discarded %" PRIu64 " idle samples before the first change\n",
+                    res->idle_discarded_bytes / 4 * unpack_samples_per_word(cfg->channels));
+        if (!res->activity_seen)
+            fprintf(stderr, "idle stop: no change seen on any channel\n");
+        else if (res->idle_stopped)
+            fprintf(stderr, "idle stop: stopped after %.3f s without a change\n", cfg->idle_stop_s);
+        else
+            fprintf(stderr, "idle stop: sample limit reached before the line went idle\n");
+    }
 }
 
 typedef struct {
@@ -170,10 +186,12 @@ static int check_dev_pio(void)
 
 int main(int argc, char **argv)
 {
-    enum { OPT_GEN_ONLY = 256, OPT_DMA_BUF, OPT_RAW, OPT_STREAM };
+    enum { OPT_GEN_ONLY = 256, OPT_DMA_BUF, OPT_RAW, OPT_STREAM, OPT_DURATION, OPT_IDLE_STOP };
     static const struct option opts[] = {
         { "rate", required_argument, NULL, 'r' },
         { "samples", required_argument, NULL, 'n' },
+        { "duration", required_argument, NULL, OPT_DURATION },
+        { "idle-stop", required_argument, NULL, OPT_IDLE_STOP },
         { "out", required_argument, NULL, 'o' },
         { "raw", required_argument, NULL, OPT_RAW },
         { "channels", required_argument, NULL, 'c' },
@@ -196,7 +214,7 @@ int main(int argc, char **argv)
         .stop = &g_stop,
     };
     const char *out_path = NULL, *raw_path = NULL;
-    double rate = 0, gen_hz = 0;
+    double rate = 0, gen_hz = 0, duration_s = 0;
     bool have_rate = false, have_samples = false, gen_only = false, stream = false;
     stream_ctx_t sctx = { 0 };
     capture_result_t res = { 0 };
@@ -228,6 +246,18 @@ int main(int argc, char **argv)
             break;
         case OPT_RAW:
             raw_path = optarg;
+            break;
+        case OPT_DURATION:
+            if (!parse_duration(optarg, &duration_s)) {
+                fprintf(stderr, "invalid --duration '%s' (e.g. 500ms, 10s, 2m)\n", optarg);
+                return 1;
+            }
+            break;
+        case OPT_IDLE_STOP:
+            if (!parse_duration(optarg, &cfg.idle_stop_s)) {
+                fprintf(stderr, "invalid --idle-stop '%s' (e.g. 500ms, 2s)\n", optarg);
+                return 1;
+            }
             break;
         case 'c':
             if (!parse_si_u64(optarg, &u) || !unpack_channels_valid((unsigned)u) || u > 8) {
@@ -302,9 +332,11 @@ int main(int argc, char **argv)
                 fprintf(stderr, "--stream needs --rate\n");
                 return 1;
             }
-            if (have_samples || out_path || raw_path || cfg.mode != CAPTURE_DMA) {
+            if (have_samples || duration_s > 0 || cfg.idle_stop_s > 0 || out_path || raw_path ||
+                cfg.mode != CAPTURE_DMA) {
                 fprintf(stderr, "--stream runs until Ctrl-C and writes to stdout: "
-                                "don't combine it with --samples, --out, --raw or --mode naive\n");
+                                "don't combine it with --samples, --duration, --idle-stop, "
+                                "--out, --raw or --mode naive\n");
                 return 1;
             }
             if (isatty(STDOUT_FILENO)) {
@@ -314,9 +346,28 @@ int main(int argc, char **argv)
                                 "-P uart:rx=0:baudrate=115200 -B uart=rx\n");
                 return 1;
             }
-        } else if (!have_rate || !have_samples || (!out_path && !raw_path)) {
-            usage(stderr);
-            return 1;
+        } else {
+            if (have_samples && duration_s > 0) {
+                fprintf(stderr, "give either --samples or --duration, not both\n");
+                return 1;
+            }
+            if (!have_rate || (!have_samples && duration_s <= 0) || (!out_path && !raw_path)) {
+                usage(stderr);
+                return 1;
+            }
+            if (duration_s > 0) {
+                double n = ceil(duration_s * clkdiv_hz(cfg.div));
+
+                if (n > 1e15) {
+                    fprintf(stderr, "--duration too long\n");
+                    return 1;
+                }
+                cfg.samples = (uint64_t)n;
+            }
+            if (cfg.idle_stop_s > 0 && cfg.mode != CAPTURE_DMA) {
+                fprintf(stderr, "--idle-stop needs --mode dma\n");
+                return 1;
+            }
         }
         if (cfg.base_gpio + cfg.channels > CAPTURE_GPIO_COUNT) {
             fprintf(stderr, "capture GPIOs %u..%u out of range\n", cfg.base_gpio,

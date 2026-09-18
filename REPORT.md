@@ -64,6 +64,7 @@ All measurements are from 2026-09-16 unless dated otherwise. Items marked
 | Correctness (M4) | 100 kHz at 10 MSa/s, 16 M samples: 320 000 transitions, every run exactly 50 samples, other channels constant |
 | Trigger (M7) | `low`/`falling`/`rising` block on an idle-high line, `high` fires; rising edge lands just before sample 0 |
 | UART (M6) | 115200 8N1 loopback, 8000 bytes, `cmp` → MATCH |
+| Auto-stop (2026-09-19) | `--duration 60s --idle-stop 1s` ended a capture on its own 1 s after a 1 kHz signal stopped: lead-in kept, idle lead discarded, 0 stalls, exit 0 |
 
 ### 3.3 Rate ceiling
 

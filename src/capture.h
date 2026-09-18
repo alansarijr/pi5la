@@ -28,6 +28,8 @@ typedef struct {
     trig_type_t trig;
     unsigned trig_pin;          /* relative to base_gpio */
     uint32_t dma_buf_bytes;     /* cyclic DMA period, multiple of 4 */
+    double idle_stop_s;         /* > 0: DMA only; wait for the first change, keep about one
+                                   period of lead-in, stop after this long without one */
     volatile sig_atomic_t *stop; /* optional: set from a signal handler */
 } capture_config_t;
 
@@ -48,6 +50,11 @@ typedef struct {
 
     bool overflow;              /* DMA ring wrapped over unread data; capture cut short */
     bool interrupted;
+
+    /* --idle-stop */
+    bool activity_seen;         /* a change was seen on some channel */
+    bool idle_stopped;          /* stopped after idle_stop_s without a change */
+    uint64_t idle_discarded_bytes; /* idle packed bytes dropped before the first change */
 } capture_result_t;
 
 /* Returns 0 on success, -1 on error (message on stderr). */
