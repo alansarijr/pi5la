@@ -38,6 +38,24 @@ target ──[R 100–330 Ω]──► 74LVC245 An ──► Bn ──► Pi 5 G
 target GND ───────────────────────────────────── Pi 5 GND
 ```
 
+One DIP-20 74LVC245 covers all 8 channels. Chip pin → Pi pin, in channel order:
+
+| Channel | Buffer in (A) | Buffer out (B) | Pi pin |
+|---|---|---|---|
+| 0 | 2 | 18 | 3 |
+| 1 | 3 | 17 | 5 |
+| 2 | 4 | 16 | 7 |
+| 3 | 5 | 15 | 29 |
+| 4 | 6 | 14 | 31 |
+| 5 | 7 | 13 | 26 |
+| 6 | 8 | 12 | 24 |
+| 7 | 9 | 11 | 21 |
+
+Chip pin 20 = VCC (Pi pin 1, 3.3 V), pin 10 = GND, pin 1 = DIR to 3.3 V (A→B),
+pin 19 = /OE to GND. **Tie unused A inputs to GND**: a floating CMOS input
+reads as noise, which looks like a busy channel and keeps `--idle-stop` from
+ever firing.
+
 ---
 
 ## Build (M0)
@@ -127,6 +145,26 @@ To build and run only the unit tests on any Linux box, without piolib:
 ---
 
 ## Usage
+
+### Channels
+
+Channel k is GPIO `base + k`, so with the default base of GPIO 2:
+
+| Channel | GPIO | Physical pin | Name in `.sr` | Name in `--stream` |
+|---|---|---|---|---|
+| 0 | 2 | 3 | GPIO2 | 0 |
+| 1 | 3 | 5 | GPIO3 | 1 |
+| 2 | 4 | 7 | GPIO4 | 2 |
+| 3 | 5 | 29 | GPIO5 | 3 |
+| 4 | 6 | 31 | GPIO6 | 4 |
+| 5 | 7 | 26 | GPIO7 | 5 |
+| 6 | 8 | 24 | GPIO8 | 6 |
+| 7 | 9 | 21 | GPIO9 | 7 |
+
+Generator output is GPIO 20 = pin 38, the Pi's own UART TX is GPIO 14 = pin 8,
+and GND is pins 6, 9, 14, 20, 25, 30, 34 and 39. Odd pins are the inner row,
+even pins the outer row, and pin 1 is the square pad. The same table is in
+`PROJECT_SUMMARY.md`; `--channels N` keeps channels 0..N-1 and drops the rest.
 
 ```
 pi5la --rate 10M --samples 1000000 --out capture.sr
@@ -229,6 +267,52 @@ Other decoders work the same way, for example I²C on channels 0 and 1:
 pi5la --rate 4M --stream | sigrok-cli -I binary:numchannels=8:samplerate=4000000 -i - \
     -P i2c:scl=0:sda=1 -A i2c
 ```
+
+---
+
+## Web UI
+
+`web/app.py` is a small Flask app that runs on the Pi and drives the same
+binaries from a browser: set up a capture, watch its progress live, then
+download or decode the `.sr` file. It never uses a shell — every argument is
+validated and passed as an argument list by `web/args.py`.
+
+> ⚠️ **No authentication.** Anyone who can reach the Pi on your network can
+> start captures and download files. Keep it on a trusted LAN, or bind it to
+> localhost (`--host 127.0.0.1`) and reach it through an SSH tunnel.
+
+Install once (Bookworm's system Python is externally managed, so use a venv):
+
+```bash
+python3 -m venv ~/pi5la-ui-venv
+~/pi5la-ui-venv/bin/pip install -r ~/pi5la/web/requirements.txt
+```
+
+Run it:
+
+```bash
+~/pi5la-ui-venv/bin/python ~/pi5la/web/app.py \
+    --pi5la ~/build-pi5la/pi5la --captures ~/captures
+```
+
+Then open `http://<pi-address>:8080`. Options: `--host`, `--port`,
+`--sigrok`, `--captures` (default `~/captures`).
+
+What the page does:
+
+- **Capture** — rate, channels, base GPIO, max duration, idle stop, trigger and
+  DMA buffer, with presets for UART, I²C and SPI. Start and Stop; Stop sends
+  SIGINT, so pi5la still writes the partial file. pi5la's own output (stall
+  events, throughput, `idle stop: …`) streams into the page, and rates above
+  the proven 50 MB/s show a warning.
+- **Live decode** — `pi5la --stream` piped into `sigrok-cli`, the same pipeline
+  as `uart-listen`, with the decoded bytes appended as they arrive.
+- **Captures** — list, download, delete, and decode a saved file as UART, I²C
+  or SPI.
+
+Only one job runs at a time, since a capture holds `/dev/pio0`; a second Start
+is refused with a message. `tests/test_web_args.py` covers the argument
+building and runs as part of `ctest`.
 
 ---
 

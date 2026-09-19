@@ -1,0 +1,149 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>pi5la</title>
+<link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}">
+</head>
+<body>
+<header>
+  <h1>pi5la</h1>
+  <p class="sub">8-channel logic analyzer &middot; GPIO 2&ndash;9 &middot; Raspberry Pi 5</p>
+</header>
+
+<main>
+<section class="panel">
+  <h2>Channels</h2>
+  <p class="hint">Channel k is GPIO base+k. With the default base of GPIO 2:</p>
+  <table class="pins">
+    <thead><tr><th>Channel</th><th>GPIO</th><th>Pi pin</th><th>74LVC245 in / out</th></tr></thead>
+    <tbody>
+      <tr><td>0</td><td>2</td><td>3</td><td>2 / 18</td></tr>
+      <tr><td>1</td><td>3</td><td>5</td><td>3 / 17</td></tr>
+      <tr><td>2</td><td>4</td><td>7</td><td>4 / 16</td></tr>
+      <tr><td>3</td><td>5</td><td>29</td><td>5 / 15</td></tr>
+      <tr><td>4</td><td>6</td><td>31</td><td>6 / 14</td></tr>
+      <tr><td>5</td><td>7</td><td>26</td><td>7 / 13</td></tr>
+      <tr><td>6</td><td>8</td><td>24</td><td>8 / 12</td></tr>
+      <tr><td>7</td><td>9</td><td>21</td><td>9 / 11</td></tr>
+    </tbody>
+  </table>
+  <p class="hint">GND: pins 6, 9, 14, 20, 25, 30, 34, 39. Never connect pins 1, 2, 4 or 17
+     (3.3 V / 5 V) to a GPIO. Every external target goes through the 74LVC245 buffer with a
+     shared ground, and unused buffer inputs are tied to GND.</p>
+</section>
+
+<section class="panel">
+  <h2>Capture</h2>
+  <div class="presets">
+    <span>Presets:</span>
+    <button type="button" data-preset="uart">UART 115200</button>
+    <button type="button" data-preset="i2c">I&sup2;C 400k</button>
+    <button type="button" data-preset="spi">SPI 5 MHz</button>
+  </div>
+  <form id="capture-form" class="grid">
+    <label>Rate <input name="rate" value="2M" required></label>
+    <label>Channels
+      <select name="channels">
+        <option>8</option><option>4</option><option>2</option><option>1</option>
+      </select>
+    </label>
+    <label>Base GPIO <input name="base_gpio" value="2"></label>
+    <label>Max duration <input name="duration" value="60s" required></label>
+    <label>Idle stop <input name="idle_stop" value="1s" placeholder="empty = off"></label>
+    <label>Trigger
+      <select name="trigger">
+        <option value="none">none</option>
+        <option>rising</option><option>falling</option><option>high</option><option>low</option>
+      </select>
+    </label>
+    <label>Trigger channel <input name="trigger_channel" value="0"></label>
+    <label>DMA buffer <input name="dma_buf" placeholder="bytes, empty = 1 MiB"></label>
+  </form>
+  <div class="actions">
+    <button id="start-capture" class="primary">Start capture</button>
+    <button id="stop-job">Stop</button>
+    <span id="job-state" class="state"></span>
+  </div>
+  <p class="hint">Idle stop waits for the first change on any channel, then ends the
+     capture once the line has been quiet that long. Waiting is unlimited &mdash; press
+     Stop to give up.</p>
+</section>
+
+<section class="panel">
+  <h2>Live decode</h2>
+  <form id="live-form" class="grid">
+    <label>Rate <input name="rate" value="2M"></label>
+    <label>Protocol
+      <select name="protocol" class="protocol">
+        <option value="uart">UART</option>
+        <option value="i2c">I&sup2;C</option>
+        <option value="spi">SPI</option>
+      </select>
+    </label>
+    <label class="p-uart">RX channel <input name="rx" value="0"></label>
+    <label class="p-uart">Baud rate <input name="baudrate" value="115200"></label>
+    <label class="p-i2c hidden">SCL channel <input name="scl" value="0"></label>
+    <label class="p-i2c hidden">SDA channel <input name="sda" value="1"></label>
+    <label class="p-spi hidden">CLK channel <input name="clk" value="0"></label>
+    <label class="p-spi hidden">MOSI channel <input name="mosi" value="1"></label>
+    <label class="p-spi hidden">MISO channel <input name="miso" placeholder="optional"></label>
+    <label class="p-spi hidden">CS channel <input name="cs" placeholder="optional"></label>
+  </form>
+  <div class="actions">
+    <button id="start-live" class="primary">Start live decode</button>
+  </div>
+  <p class="hint">sigrok's decoders run in Python, so keep the rate low: about 2 MSa/s
+     handles 115200 baud comfortably.</p>
+</section>
+
+<section class="panel">
+  <h2>Output</h2>
+  <pre id="log" class="log" aria-live="polite"></pre>
+</section>
+
+<section class="panel">
+  <h2>Captures</h2>
+  <button id="refresh-captures">Refresh</button>
+  <table id="captures">
+    <thead><tr><th>File</th><th>Size</th><th>When</th><th></th></tr></thead>
+    <tbody></tbody>
+  </table>
+  <div id="decode-box" class="hidden">
+    <h3>Decode <span id="decode-name"></span></h3>
+    <form id="decode-form" class="grid">
+      <label>Protocol
+        <select name="protocol" class="protocol">
+          <option value="uart">UART</option>
+          <option value="i2c">I&sup2;C</option>
+          <option value="spi">SPI</option>
+        </select>
+      </label>
+      <label>Channels captured
+        <select name="channels">
+          <option>8</option><option>4</option><option>2</option><option>1</option>
+        </select>
+      </label>
+      <label>Base GPIO <input name="base_gpio" value="2"></label>
+      <label class="p-uart">RX channel <input name="rx" value="0"></label>
+      <label class="p-uart">Baud rate <input name="baudrate" value="115200"></label>
+      <label class="p-i2c hidden">SCL channel <input name="scl" value="0"></label>
+      <label class="p-i2c hidden">SDA channel <input name="sda" value="1"></label>
+      <label class="p-spi hidden">CLK channel <input name="clk" value="0"></label>
+      <label class="p-spi hidden">MOSI channel <input name="mosi" value="1"></label>
+      <label class="p-spi hidden">MISO channel <input name="miso" placeholder="optional"></label>
+      <label class="p-spi hidden">CS channel <input name="cs" placeholder="optional"></label>
+    </form>
+    <div class="actions">
+      <button id="run-decode" class="primary">Decode</button>
+      <button id="close-decode">Close</button>
+    </div>
+    <pre id="decode-out" class="log"></pre>
+  </div>
+</section>
+</main>
+
+<script src="{{ url_for('static', filename='app.js') }}"></script>
+</body>
+</html>

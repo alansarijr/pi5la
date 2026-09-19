@@ -100,3 +100,10 @@ foreach(t test_unpack test_srzip test_analyze test_progbuild test_util test_idle
     target_link_libraries(${t} PRIVATE pi5la_core)
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
+
+# Web UI argument validation (web/args.py). Skipped when python3 is missing.
+find_program(PI5LA_PYTHON3 python3)
+if(PI5LA_PYTHON3)
+    add_test(NAME test_web_args
+        COMMAND ${PI5LA_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_web_args.py)
+endif()
