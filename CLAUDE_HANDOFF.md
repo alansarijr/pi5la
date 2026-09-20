@@ -58,6 +58,11 @@ The latest commit adds `--duration` / `--idle-stop`. See `REPORT.md` for the fin
 - **Live `--stream` / `uart-listen.sh`, `--duration`, `--idle-stop`** (2026-09-19).
 
 **Not yet verified:**
+0. **Unbounded capture, `--silence-timeout` rename and `--monitor`** (2026-09-21). They
+   build clean and pass 10 host tests (including `test_record`, which stubs
+   `capture_stream` and checks burst files, index.json and the caps), but have **never run
+   on the Pi**. Copy the repo and rebuild first. Watch RSS during a long run: it must stay
+   flat now that samples stream to disk.
 1. ~~`pi5la --stream` / `uart-listen.sh`~~ Done 2026-09-19: decoded `hello live` as it
    arrived (15.7 M samples at 2 MSa/s, 0 stalls). `--duration` / `--idle-stop` verified on
    the same wiring.
@@ -91,9 +96,16 @@ The latest commit adds `--duration` / `--idle-stop`. See `REPORT.md` for the fin
 - **Live mode:** `--stream` writes one byte per sample to stdout. `uart-listen.sh` pipes
   it into `sigrok-cli -I binary:numchannels=8:samplerate=<Hz> -i -`. In that input,
   channels are named `0`–`7`, not `GPIO2`.
-- **Auto-stop:** `--idle-stop T` scans each DMA period for a word that isn't the idle
-  level repeated (`src/idle.c`), waits for the first change keeping ~1 period of lead-in,
-  then stops after T without one. Detection lags by up to one period.
+- **Recording streams to disk** (`src/srwriter.c`, `srzip_write_file()`): samples are
+  appended to `<out>.logic` and zipped into the `.sr` at the end, so a capture needs no
+  length and RAM stays flat. `capture_run()`'s in-RAM path is kept only for `--raw` and
+  `--mode naive` (M2/M4 and the tools).
+- **Auto-stop:** `--silence-timeout T` (was `--idle-stop`, alias kept) scans each DMA
+  period for a word that isn't the idle level repeated (`src/idle.c`), waits for the first
+  change keeping `--pre` of lead-in, then stops after T without one.
+- **`--monitor DIR`** records only bursts (`src/burst.c` state machine, `src/record.c`
+  I/O): burst-NNNN.sr plus index.json with start_time/duration/gap_before_s. Idle is never
+  written. Trailing idle is removed with `ftruncate()`. Detection lags by up to one period.
 - **Exit codes:** `0` OK, `1` error, `2` dropped samples (RXSTALL or ring overflow). The
   wall-clock loss estimate is informational only.
 - M8 (RLE, pre-trigger) was skipped by agreement.

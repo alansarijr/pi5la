@@ -15,7 +15,8 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(args.parse_si("10M"), 10e6)
         self.assertEqual(args.parse_si("115.2k"), 115200)
         self.assertEqual(args.parse_si(" 4000 "), 4000)
-        for bad in ("", "10G", "-5", "5kk", "M", None, "1e6"):
+        self.assertEqual(args.parse_si("4G"), 4e9)
+        for bad in ("", "10T", "-5", "5kk", "M", None, "1e6"):
             with self.assertRaises(args.InvalidInput):
                 args.parse_si(bad)
 
@@ -39,26 +40,47 @@ class TestParsing(unittest.TestCase):
 
 class TestCaptureCommand(unittest.TestCase):
     def base_form(self, **kw):
-        form = {"rate": "2M", "channels": "8", "duration": "60s"}
+        form = {"rate": "2M", "channels": "8"}
         form.update(kw)
         return form
 
-    def test_minimal(self):
+    def test_minimal_runs_until_stopped(self):
+        """No duration: the capture runs until Stop."""
         argv, warnings = args.capture_command(self.base_form(), pi5la="/bin/pi5la",
                                               out_path="/c/x.sr")
         self.assertEqual(argv, ["/bin/pi5la", "--rate", "2M", "--channels", "8",
-                                "--base-gpio", "2", "--duration", "60s", "--out", "/c/x.sr"])
+                                "--base-gpio", "2", "--out", "/c/x.sr",
+                                "--max-size", "4G"])
+        self.assertNotIn("--duration", argv)
         self.assertEqual(warnings, [])
 
     def test_all_options(self):
         argv, _ = args.capture_command(self.base_form(
-            idle_stop="1s", trigger="falling", trigger_channel="3", dma_buf="131072",
-            base_gpio="4", channels="4"))
-        self.assertIn("--idle-stop", argv)
-        self.assertEqual(argv[argv.index("--idle-stop") + 1], "1s")
+            duration="60s", silence_timeout="1s", trigger="falling", trigger_channel="3",
+            dma_buf="131072", base_gpio="4", channels="4", max_size="500M"))
+        self.assertEqual(argv[argv.index("--duration") + 1], "60s")
+        self.assertEqual(argv[argv.index("--silence-timeout") + 1], "1s")
         self.assertEqual(argv[argv.index("--trigger") + 1], "falling:3")
         self.assertEqual(argv[argv.index("--dma-buf") + 1], "131072")
         self.assertEqual(argv[argv.index("--base-gpio") + 1], "4")
+        self.assertEqual(argv[argv.index("--max-size") + 1], "500M")
+        self.assertNotIn("--idle-stop", argv)
+
+    def test_monitor_mode(self):
+        argv, _ = args.capture_command(self.base_form(monitor=True),
+                                       out_path="/c/mon-20260921-101500")
+        self.assertIn("--monitor", argv)
+        self.assertNotIn("--out", argv)
+        self.assertEqual(argv[argv.index("--monitor") + 1], "/c/mon-20260921-101500")
+        # Burst edges get their documented defaults.
+        self.assertEqual(argv[argv.index("--gap") + 1], "100ms")
+        self.assertEqual(argv[argv.index("--pre") + 1], "10ms")
+        self.assertEqual(argv[argv.index("--post") + 1], "50ms")
+
+        argv, _ = args.capture_command(self.base_form(monitor="true", gap="1s", pre="5ms",
+                                                      post="200ms"))
+        self.assertEqual(argv[argv.index("--gap") + 1], "1s")
+        self.assertEqual(argv[argv.index("--post") + 1], "200ms")
 
     def test_rejects_bad_input(self):
         cases = [
@@ -67,8 +89,11 @@ class TestCaptureCommand(unittest.TestCase):
             {"rate": "400M"},                        # above the PIO clock
             {"rate": "1"},                           # below the slowest divider
             {"rate": "2M; rm -rf /"},                # shell metacharacters
-            {"duration": ""},
             {"duration": "0s"},
+            {"duration": "later"},
+            {"silence_timeout": "0s"},
+            {"monitor": True, "gap": "soon"},
+            {"max_size": "big"},
             {"base_gpio": "27"},                     # 27 + 8 channels is past GPIO 27
             {"base_gpio": "-1"},
             {"trigger": "sideways"},
@@ -87,9 +112,29 @@ class TestCaptureCommand(unittest.TestCase):
         _, warnings = args.capture_command(self.base_form(rate="100M", duration="1s"))
         self.assertTrue(any("50 MB/s" in w for w in warnings))
 
-    def test_memory_warning(self):
-        _, warnings = args.capture_command(self.base_form(rate="50M", duration="60s"))
-        self.assertTrue(any("RAM" in w for w in warnings))
+    def test_disk_warning(self):
+        """Continuous recording is bounded by SD card speed, monitor mode is not."""
+        _, warnings = args.capture_command(self.base_form(rate="50M"))
+        self.assertTrue(any("SD card" in w for w in warnings))
+        _, warnings = args.capture_command(self.base_form(rate="50M", monitor=True))
+        self.assertFalse(any("SD card" in w for w in warnings))
+        _, warnings = args.capture_command(self.base_form(rate="2M"))
+        self.assertFalse(any("SD card" in w for w in warnings))
+
+
+class TestCaptureRefs(unittest.TestCase):
+    def test_monitor_dir_name(self):
+        stamp = datetime.datetime(2026, 9, 21, 10, 15, 0)
+        self.assertEqual(args.new_monitor_dir(stamp), "mon-20260921-101500")
+
+    def test_refs(self):
+        self.assertEqual(args.safe_capture_ref("cap-1.sr"), "cap-1.sr")
+        self.assertEqual(args.safe_capture_ref("mon-20260921-101500/burst-0001.sr"),
+                         "mon-20260921-101500/burst-0001.sr")
+        for bad in ("../x.sr", "mon-20260921-101500/../../etc/x.sr", "other/burst-1.sr",
+                    "mon-bad/burst-1.sr", "a/b/c.sr", "mon-20260921-101500/x.txt", None):
+            with self.assertRaises(args.InvalidInput, msg=bad):
+                args.safe_capture_ref(bad)
 
 
 class TestDecoders(unittest.TestCase):

@@ -21,7 +21,9 @@ pkg_check_modules(LIBZIP REQUIRED IMPORTED_TARGET libzip)
 
 add_library(pi5la_core STATIC
     src/analyze.c
+    src/burst.c
     src/idle.c
+    src/srwriter.c
     src/progbuild.c
     src/srzip.c
     src/unpack.c
@@ -66,6 +68,7 @@ if(NOT PI5LA_TESTS_ONLY)
     add_library(pi5la_hw STATIC
         src/capture.c
         src/dmacyclic.c
+        src/record.c
         src/fdebug.c
         src/generator.c
     )
@@ -90,12 +93,20 @@ if(NOT PI5LA_TESTS_ONLY)
         FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
                          WORLD_READ WORLD_EXECUTE)
 
+    # record.c drives the streaming/monitor logic; the test stubs capture_stream,
+    # so it compiles record.c directly instead of linking pi5la_hw.
+    add_executable(test_record tests/test_record.c src/record.c)
+    target_include_directories(test_record PRIVATE ${PIOLIB_INCLUDE_DIR})
+    target_link_libraries(test_record PRIVATE pi5la_core)
+    add_test(NAME test_record COMMAND test_record)
+
     install(TARGETS pi5la ratesweep bitprobe fdebugtest RUNTIME DESTINATION bin)
     install(PROGRAMS tools/uart-listen.sh DESTINATION bin RENAME uart-listen)
 endif()
 
 enable_testing()
-foreach(t test_unpack test_srzip test_analyze test_progbuild test_util test_idle)
+foreach(t test_unpack test_srzip test_srwriter test_analyze test_progbuild test_util
+          test_idle test_burst)
     add_executable(${t} tests/${t}.c)
     target_link_libraries(${t} PRIVATE pi5la_core)
     add_test(NAME ${t} COMMAND ${t})

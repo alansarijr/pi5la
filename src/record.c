@@ -1,0 +1,404 @@
+#define _POSIX_C_SOURCE 200809L
+#include "record.h"
+
+#include <errno.h>
+#include <inttypes.h>
+#include <math.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <time.h>
+
+#include "burst.h"
+#include "idle.h"
+#include "srwriter.h"
+#include "unpack.h"
+
+#define MAX_BURSTS 100000
+#define PATH_LEN 1024
+
+typedef struct {
+    unsigned index;
+    uint64_t start_sample;
+    uint64_t samples;
+    double start_time;          /* wall clock, seconds since the epoch */
+    double gap_before_s;
+} burst_info_t;
+
+typedef struct {
+    const capture_config_t *cfg;
+    const record_opts_t *opts;
+    record_stats_t *stats;
+
+    unsigned spw;
+    double rate_hz;
+    double t0;                  /* wall clock at capture start */
+    char names[8][16];
+    const char *name_ptrs[8];
+
+    uint8_t *buf;               /* unpacked period */
+    size_t buf_cap;
+
+    idle_scan_t scan;
+    uint64_t last_change;       /* absolute sample index just past the last change */
+    uint64_t silence_samples;   /* 0 = no silence timeout */
+    bool waiting;               /* holding off until the first change */
+
+    uint8_t *ring;              /* the most recent pre_samples, for lead-in */
+    uint64_t ring_cap;
+    uint64_t ring_len;
+
+    srwriter_t w;
+    bool file_open;
+    uint64_t file_start;        /* absolute sample of the file's first sample */
+
+    burst_t burst;
+    burst_info_t *bursts;
+    unsigned n_bursts;
+    uint64_t prev_burst_end;    /* absolute sample where the previous burst ended */
+
+    bool failed;
+} rec_t;
+
+/* ---------- helpers ---------- */
+
+static double now_s(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (double)ts.tv_sec + ts.tv_nsec / 1e9;
+}
+
+static uint64_t samples_for(double seconds, double rate_hz)
+{
+    double n;
+
+    if (seconds <= 0)
+        return 0;
+    n = ceil(seconds * rate_hz);
+    return n > 0 ? (uint64_t)n : 0;
+}
+
+static void ring_append(rec_t *r, const uint8_t *samples, uint64_t n)
+{
+    uint64_t keep;
+
+    if (r->ring_cap == 0)
+        return;
+    if (n >= r->ring_cap) {
+        memcpy(r->ring, samples + (n - r->ring_cap), (size_t)r->ring_cap);
+        r->ring_len = r->ring_cap;
+        return;
+    }
+    keep = r->ring_len + n > r->ring_cap ? r->ring_cap - n : r->ring_len;
+    memmove(r->ring, r->ring + (r->ring_len - keep), (size_t)keep);
+    memcpy(r->ring + keep, samples, (size_t)n);
+    r->ring_len = keep + n;
+}
+
+/* ---------- file handling ---------- */
+
+static int file_open(rec_t *r, const char *path, uint64_t start_sample)
+{
+    if (srwriter_open(&r->w, path))
+        return -1;
+    r->file_open = true;
+    r->file_start = start_sample;
+    return 0;
+}
+
+static int file_write(rec_t *r, const uint8_t *samples, uint64_t n)
+{
+    if (srwriter_write(&r->w, samples, (size_t)n))
+        return -1;
+    r->stats->written += n;
+    return 0;
+}
+
+/* Writes [from, to) of a period that starts at `base`, pulling anything before
+   `base` out of the lead-in ring. */
+static int file_write_range(rec_t *r, const uint8_t *period, uint64_t base, uint64_t n,
+                            uint64_t from, uint64_t to)
+{
+    if (from < base) {
+        uint64_t want = base - from;
+
+        if (want > r->ring_len)     /* the ring no longer reaches that far back */
+            want = r->ring_len;
+        if (want && file_write(r, r->ring + (r->ring_len - want), want))
+            return -1;
+        from = base;
+    }
+    if (to > base + n)
+        to = base + n;
+    if (to > from && file_write(r, period + (from - base), to - from))
+        return -1;
+    return 0;
+}
+
+static int file_close(rec_t *r, uint64_t keep_until)
+{
+    if (!r->file_open)
+        return 0;
+    if (keep_until > r->file_start) {
+        uint64_t keep = keep_until - r->file_start;
+
+        if (keep < r->w.samples) {
+            r->stats->written -= r->w.samples - keep;
+            if (srwriter_truncate(&r->w, keep))
+                return -1;
+        }
+    }
+    r->file_open = false;
+    return srwriter_finish(&r->w, (uint64_t)llround(r->rate_hz), r->cfg->channels,
+                           r->name_ptrs);
+}
+
+/* ---------- monitor index ---------- */
+
+static int write_index(rec_t *r)
+{
+    char path[PATH_LEN];
+    FILE *f;
+    unsigned i;
+
+    snprintf(path, sizeof(path), "%s/index.json", r->opts->monitor_dir);
+    f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "record: cannot write %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    fprintf(f, "{\n  \"samplerate_hz\": %.0f,\n  \"channels\": %u,\n  \"base_gpio\": %u,\n",
+            r->rate_hz, r->cfg->channels, r->cfg->base_gpio);
+    fprintf(f, "  \"started\": %.3f,\n  \"gap_s\": %g,\n  \"pre_s\": %g,\n  \"post_s\": %g,\n",
+            r->t0, r->opts->gap_s, r->opts->pre_s, r->opts->post_s);
+    fprintf(f, "  \"bursts\": [\n");
+    for (i = 0; i < r->n_bursts; i++) {
+        const burst_info_t *b = &r->bursts[i];
+
+        fprintf(f, "    { \"file\": \"burst-%04u.sr\", \"start_sample\": %" PRIu64
+                   ", \"samples\": %" PRIu64 ", \"start_time\": %.3f, \"duration_s\": %.6f"
+                   ", \"gap_before_s\": %.6f }%s\n",
+                b->index, b->start_sample, b->samples, b->start_time,
+                b->samples / r->rate_hz, b->gap_before_s, i + 1 < r->n_bursts ? "," : "");
+    }
+    fprintf(f, "  ]\n}\n");
+    if (fclose(f)) {
+        fprintf(stderr, "record: writing %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
+static int burst_open(rec_t *r, uint64_t start_sample)
+{
+    char path[PATH_LEN];
+
+    if (r->n_bursts >= MAX_BURSTS) {
+        fprintf(stderr, "record: too many bursts (%d)\n", MAX_BURSTS);
+        return -1;
+    }
+    snprintf(path, sizeof(path), "%s/burst-%04u.sr", r->opts->monitor_dir, r->n_bursts + 1);
+    if (file_open(r, path, start_sample))
+        return -1;
+    fprintf(stderr, "burst %u starts at sample %" PRIu64 " (%.3f s)\n", r->n_bursts + 1,
+            start_sample, start_sample / r->rate_hz);
+    return 0;
+}
+
+static int burst_close(rec_t *r, uint64_t keep_until)
+{
+    burst_info_t *info;
+    uint64_t samples;
+
+    if (!r->file_open)
+        return 0;
+    samples = keep_until > r->file_start ? keep_until - r->file_start : 0;
+    if (samples > r->w.samples)
+        samples = r->w.samples;
+    if (file_close(r, keep_until))
+        return -1;
+
+    info = &r->bursts[r->n_bursts];
+    info->index = r->n_bursts + 1;
+    info->start_sample = r->file_start;
+    info->samples = samples;
+    info->start_time = r->t0 + r->file_start / r->rate_hz;
+    info->gap_before_s = (double)(r->file_start - r->prev_burst_end) / r->rate_hz;
+    r->prev_burst_end = r->file_start + samples;
+    r->n_bursts++;
+    r->stats->bursts = r->n_bursts;
+
+    fprintf(stderr, "burst %u: %" PRIu64 " samples (%.3f s)\n", info->index, info->samples,
+            info->samples / r->rate_hz);
+    return write_index(r);
+}
+
+/* ---------- the sink ---------- */
+
+static int sink(const uint32_t *words, size_t n_words, void *arg)
+{
+    rec_t *r = arg;
+    const record_opts_t *o = r->opts;
+    uint64_t n = (uint64_t)n_words * r->spw;
+    uint64_t base = r->stats->samples;
+    size_t cb = 0, ce = 0;
+    bool changed;
+
+    if (n > r->buf_cap) {
+        uint8_t *nb = realloc(r->buf, (size_t)n);
+
+        if (!nb) {
+            fprintf(stderr, "record: cannot allocate %" PRIu64 " bytes\n", n);
+            r->failed = true;
+            return -1;
+        }
+        r->buf = nb;
+        r->buf_cap = (size_t)n;
+    }
+    unpack_words(words, n_words, r->cfg->channels, r->buf, (size_t)n);
+
+    changed = idle_scan_range(&r->scan, words, n_words, &cb, &ce);
+    if (changed) {
+        r->last_change = base + (uint64_t)ce * r->spw;
+        r->stats->activity_seen = true;
+    }
+    r->stats->samples = base + n;
+
+    if (o->monitor_dir) {
+        burst_action_t act;
+
+        burst_feed(&r->burst, n, changed, (uint64_t)cb * r->spw, (uint64_t)ce * r->spw, &act);
+        if (act.begin && burst_open(r, act.start))
+            goto failed;
+        if (act.write && r->file_open &&
+            file_write_range(r, r->buf, base, n, act.write_from, act.write_to))
+            goto failed;
+        if (act.end && burst_close(r, act.end_at))
+            goto failed;
+        if (!r->file_open)
+            ring_append(r, r->buf, n);
+    } else if (r->waiting) {
+        /* --silence-timeout without monitor: hold off until the line moves,
+           keeping only the lead-in, so waiting costs no disk. */
+        if (!changed) {
+            ring_append(r, r->buf, n);
+        } else {
+            uint64_t start = base + (uint64_t)cb * r->spw;
+
+            start = start > r->ring_cap ? start - r->ring_cap : 0;
+            r->waiting = false;
+            if (file_open(r, o->out_path, start) ||
+                file_write_range(r, r->buf, base, n, start, base + n))
+                goto failed;
+        }
+    } else if (file_write(r, r->buf, n)) {
+        goto failed;
+    }
+
+    if (r->silence_samples && r->stats->activity_seen &&
+        r->stats->samples - r->last_change >= r->silence_samples) {
+        r->stats->silence_stopped = true;
+        return 1;
+    }
+    if (o->max_samples && r->stats->samples >= o->max_samples) {
+        r->stats->samples_cap_hit = true;
+        return 1;
+    }
+    if (o->max_bytes && r->stats->written >= o->max_bytes) {
+        r->stats->size_cap_hit = true;
+        return 1;
+    }
+    return 0;
+
+failed:
+    r->failed = true;
+    r->stats->write_failed = true;
+    return -1;
+}
+
+/* ---------- entry point ---------- */
+
+int record_run(PIO pio, const capture_config_t *cfg, const record_opts_t *opts,
+               record_stats_t *stats, capture_stream_result_t *sres)
+{
+    rec_t r;
+    unsigned k;
+    int ret;
+
+    memset(&r, 0, sizeof(r));
+    memset(stats, 0, sizeof(*stats));
+    r.cfg = cfg;
+    r.opts = opts;
+    r.stats = stats;
+    r.spw = unpack_samples_per_word(cfg->channels);
+    r.rate_hz = clkdiv_hz(cfg->div);
+    r.t0 = now_s();
+    r.w.fd = -1;
+
+    for (k = 0; k < cfg->channels; k++) {
+        snprintf(r.names[k], sizeof(r.names[k]), "GPIO%u", cfg->base_gpio + k);
+        r.name_ptrs[k] = r.names[k];
+    }
+
+    idle_scan_init(&r.scan, cfg->channels);
+    r.silence_samples = samples_for(opts->silence_s, r.rate_hz);
+    r.ring_cap = samples_for(opts->pre_s, r.rate_hz);
+    r.waiting = opts->silence_s > 0 && !opts->monitor_dir;
+
+    if (opts->monitor_dir) {
+        if (mkdir(opts->monitor_dir, 0755) && errno != EEXIST) {
+            fprintf(stderr, "record: cannot create %s: %s\n", opts->monitor_dir,
+                    strerror(errno));
+            return -1;
+        }
+        burst_init(&r.burst, r.ring_cap, samples_for(opts->post_s, r.rate_hz),
+                   samples_for(opts->gap_s, r.rate_hz));
+        r.bursts = calloc(MAX_BURSTS, sizeof(*r.bursts));
+        if (!r.bursts) {
+            fprintf(stderr, "record: out of memory\n");
+            return -1;
+        }
+    } else if (!r.waiting && file_open(&r, opts->out_path, 0)) {
+        return -1;
+    }
+
+    if (r.ring_cap) {
+        r.ring = malloc((size_t)r.ring_cap);
+        if (!r.ring) {
+            fprintf(stderr, "record: cannot allocate a %" PRIu64 "-sample lead-in\n",
+                    r.ring_cap);
+            free(r.bursts);
+            return -1;
+        }
+    }
+
+    ret = capture_stream(pio, cfg, sink, &r, sres);
+
+    if (ret == 0 && !r.failed) {
+        if (opts->monitor_dir) {
+            uint64_t end_at;
+
+            if (burst_flush(&r.burst, &end_at) && burst_close(&r, end_at))
+                ret = -1;
+            else if (write_index(&r))
+                ret = -1;
+        } else if (r.file_open) {
+            if (file_close(&r, UINT64_MAX))
+                ret = -1;
+        } else if (!r.waiting) {
+            ret = -1;   /* should not happen: no file and not waiting */
+        }
+    } else {
+        if (r.file_open)
+            srwriter_abort(&r.w);
+        ret = -1;
+    }
+
+    free(r.buf);
+    free(r.ring);
+    free(r.bursts);
+    return ret;
+}

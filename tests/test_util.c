@@ -14,7 +14,8 @@ int main(void)
     CHECK(parse_si("115.2k", &v) && fabs(v - 115200) < 1e-6);
     CHECK(parse_si("4000", &v) && v == 4000);
     CHECK(!parse_si("", &v));
-    CHECK(!parse_si("10G", &v));
+    CHECK(parse_si("4G", &v) && v == 4e9);
+    CHECK(!parse_si("10T", &v));
     CHECK(!parse_si("-5", &v));
     CHECK(!parse_si("5kk", &v));
 

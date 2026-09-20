@@ -115,6 +115,13 @@ th { font-size: 12px; text-transform: uppercase; letter-spacing: 0.04em; color: 
 td.actions-cell { display: flex; gap: 8px; flex-wrap: wrap; }
 a { color: var(--accent); }
 
+tr.session td { font-weight: 600; border-bottom-color: var(--ink); }
+tr.burst td:first-child { padding-left: 18px; color: var(--muted); }
+
+.modes { display: flex; flex-wrap: wrap; gap: 8px 18px; margin-bottom: 14px; }
+label.inline { flex-direction: row; align-items: center; gap: 6px; color: var(--ink);
+               font-size: 14px; }
+
 .hidden { display: none !important; }
 
 @media (max-width: 520px) {

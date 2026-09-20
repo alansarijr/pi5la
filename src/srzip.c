@@ -77,19 +77,19 @@ static int add_member(zip_t *za, const char *name, const void *data, size_t len)
     return 0;
 }
 
-int srzip_write(const char *path, const uint8_t *samples, size_t n_samples,
-                uint64_t samplerate_hz, unsigned channels, const char *const *probe_names)
+static zip_t *open_sr(const char *path, char *metadata, size_t meta_size, int *meta_len,
+                      uint64_t samplerate_hz, unsigned channels,
+                      const char *const *probe_names)
 {
     static const char version[] = "2";
-    char metadata[1024];
-    int meta_len, zerr;
     zip_t *za;
+    int zerr;
 
-    meta_len = srzip_build_metadata(metadata, sizeof(metadata), samplerate_hz, channels,
-                                    probe_names);
-    if (meta_len < 0) {
+    *meta_len = srzip_build_metadata(metadata, meta_size, samplerate_hz, channels,
+                                     probe_names);
+    if (*meta_len < 0) {
         fprintf(stderr, "srzip: metadata too long\n");
-        return -1;
+        return NULL;
     }
 
     za = zip_open(path, ZIP_CREATE | ZIP_TRUNCATE, &zerr);
@@ -99,21 +99,71 @@ int srzip_write(const char *path, const uint8_t *samples, size_t n_samples,
         zip_error_init_with_code(&ze, zerr);
         fprintf(stderr, "srzip: cannot create %s: %s\n", path, zip_error_strerror(&ze));
         zip_error_fini(&ze);
-        return -1;
+        return NULL;
     }
 
     /* Buffers must stay valid until zip_close(), which is where data is written. */
     if (add_member(za, "version", version, 1) ||
-        add_member(za, "metadata", metadata, (size_t)meta_len) ||
-        add_member(za, "logic-1", samples, n_samples)) {
+        add_member(za, "metadata", metadata, (size_t)*meta_len)) {
         zip_discard(za);
-        return -1;
+        return NULL;
     }
+    return za;
+}
 
+static int close_sr(zip_t *za, const char *path)
+{
     if (zip_close(za) < 0) {
         fprintf(stderr, "srzip: writing %s: %s\n", path, zip_strerror(za));
         zip_discard(za);
         return -1;
     }
     return 0;
+}
+
+int srzip_write(const char *path, const uint8_t *samples, size_t n_samples,
+                uint64_t samplerate_hz, unsigned channels, const char *const *probe_names)
+{
+    char metadata[1024];
+    int meta_len;
+    zip_t *za;
+
+    za = open_sr(path, metadata, sizeof(metadata), &meta_len, samplerate_hz, channels,
+                 probe_names);
+    if (!za)
+        return -1;
+    if (add_member(za, "logic-1", samples, n_samples)) {
+        zip_discard(za);
+        return -1;
+    }
+    return close_sr(za, path);
+}
+
+int srzip_write_file(const char *path, const char *payload_path, uint64_t samplerate_hz,
+                     unsigned channels, const char *const *probe_names)
+{
+    char metadata[1024];
+    zip_source_t *src;
+    int meta_len;
+    zip_t *za;
+
+    za = open_sr(path, metadata, sizeof(metadata), &meta_len, samplerate_hz, channels,
+                 probe_names);
+    if (!za)
+        return -1;
+
+    /* libzip streams the payload from disk at zip_close(), so it is never in RAM. */
+    src = zip_source_file(za, payload_path, 0, -1);
+    if (!src) {
+        fprintf(stderr, "srzip: cannot read %s: %s\n", payload_path, zip_strerror(za));
+        zip_discard(za);
+        return -1;
+    }
+    if (zip_file_add(za, "logic-1", src, ZIP_FL_OVERWRITE | ZIP_FL_ENC_UTF_8) < 0) {
+        fprintf(stderr, "srzip: zip_file_add(logic-1): %s\n", zip_strerror(za));
+        zip_source_free(src);
+        zip_discard(za);
+        return -1;
+    }
+    return close_sr(za, path);
 }

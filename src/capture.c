@@ -10,7 +10,6 @@
 #include "la8_trig.pio.h"
 #include "dmacyclic.h"
 #include "fdebug.h"
-#include "idle.h"
 #include "unpack.h"
 
 
@@ -82,53 +81,25 @@ static void finish_estimate(const capture_config_t *cfg, capture_result_t *res)
  * capture ends, so FDEBUG can be checked after the last period without a
  * false positive.
  *
- * With cfg->idle_stop_s, periods without a change are discarded until the
- * first change, except the newest one, which stays as lead-in. After that the
- * capture stops once idle_stop_s passes without a change, keeping that much
- * idle tail. Both checks happen per period, so stopping can lag by up to one
- * period.
+ * This path fills one buffer of a known size. Unbounded capture, silence
+ * timeouts and monitor mode run on capture_stream() instead (src/record.c).
  */
 static int run_dma(PIO pio, uint sm, int fd, const capture_config_t *cfg,
                    capture_result_t *res, size_t capacity_bytes)
 {
     size_t total = res->n_words * 4;
     size_t period = cfg->dma_buf_bytes;
-    size_t got = 0;             /* bytes kept in res->words */
-    uint64_t seen = 0;          /* bytes read, including discarded lead-in */
-    bool idle_mode = cfg->idle_stop_s > 0;
-    bool waiting = idle_mode;
-    size_t active_end = 0, idle_bytes = 0, change_end = 0;
+    size_t got = 0;
     double t_enable, t_first = 0, t_last = 0;
-    idle_scan_t *scan = NULL;
-    int stall, ret = 0;
-
-    if (idle_mode) {
-        unsigned spw = unpack_samples_per_word(cfg->channels);
-        double idle_samples = ceil(cfg->idle_stop_s * res->rate_hz);
-
-        idle_bytes = (size_t)ceil(idle_samples / spw) * 4;
-        scan = malloc(sizeof(*scan));
-        if (!scan) {
-            fprintf(stderr, "capture: out of memory\n");
-            return -1;
-        }
-        idle_scan_init(scan, cfg->channels);
-    }
+    int stall;
 
     pio_sm_set_enabled(pio, sm, true);
     t_enable = monotonic_s();
 
-    /* While waiting, idle lead-in doesn't count towards total. */
-    while (waiting || got < total) {
-        /* Still waiting with no room for a lead-in period: drop it. */
-        if (waiting && got + period > capacity_bytes) {
-            res->idle_discarded_bytes += got;
-            got = 0;
-        }
+    while (got < total) {
         if (got + period > capacity_bytes) {
             fprintf(stderr, "capture: internal error: buffer too small\n");
-            ret = -1;
-            break;
+            return -1;
         }
         if (dmacyclic_read(fd, sm, (uint32_t)period, (uint8_t *)res->words + got)) {
             if (errno == EOVERFLOW) {
@@ -140,52 +111,23 @@ static int run_dma(PIO pio, uint sm, int fd, const capture_config_t *cfg,
                 break;
             }
             fprintf(stderr, "capture: DMA receive failed: %s\n", strerror(errno));
-            ret = -1;
-            break;
+            return -1;
         }
         t_last = monotonic_s();
-        if (seen == 0)
+        if (got == 0)
             t_first = t_last;
-        seen += period;
         got += period;
 
         stall = take_rxstall(fd, sm);
-        if (stall < 0) {
-            ret = -1;
-            break;
-        }
+        if (stall < 0)
+            return -1;
         res->stall_events += (uint64_t)stall;
-
-        if (idle_mode) {
-            size_t start = got - period;
-
-            if (idle_scan_words(scan, res->words + start / 4, period / 4, &change_end))
-                active_end = start + change_end * 4;
-            if (waiting) {
-                if (active_end > 0) {
-                    waiting = false;
-                    res->activity_seen = true;
-                } else if (start > 0) {
-                    /* Keep only the newest idle period as lead-in. */
-                    memmove(res->words, (uint8_t *)res->words + start, period);
-                    res->idle_discarded_bytes += start;
-                    got = period;
-                }
-            } else if (got - active_end >= idle_bytes) {
-                res->idle_stopped = true;
-                got = active_end + idle_bytes;
-                break;
-            }
-        }
 
         if (stopped(cfg)) {
             res->interrupted = true;
             break;
         }
     }
-    free(scan);
-    if (ret)
-        return ret;
 
     /*
      * The final period may run past the requested samples: report only the
@@ -194,8 +136,8 @@ static int run_dma(PIO pio, uint sm, int fd, const capture_config_t *cfg,
      */
     res->bytes = got < total ? got : total;
     res->total_s = t_last > 0 ? t_last - t_enable : 0;
-    if (seen > period) {
-        res->steady_bytes = seen - period;
+    if (got > period) {
+        res->steady_bytes = got - period;
         res->steady_s = t_last - t_first;
     }
     return 0;
@@ -368,11 +310,6 @@ int capture_run(PIO pio, const capture_config_t *cfg, capture_result_t *res)
         fprintf(stderr, "capture: DMA buffer size must be a non-zero multiple of 4\n");
         return -1;
     }
-    if (cfg->idle_stop_s > 0 && cfg->mode != CAPTURE_DMA) {
-        fprintf(stderr, "capture: idle stop needs DMA mode\n");
-        return -1;
-    }
-
     spw = unpack_samples_per_word(cfg->channels);
     res->n_words = (size_t)((cfg->samples + spw - 1) / spw);
     capacity_bytes = res->n_words * 4;

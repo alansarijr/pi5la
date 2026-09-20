@@ -42,6 +42,12 @@
     <button type="button" data-preset="i2c">I&sup2;C 400k</button>
     <button type="button" data-preset="spi">SPI 5 MHz</button>
   </div>
+  <div class="modes">
+    <label class="inline"><input type="radio" name="mode" value="continuous" checked>
+      Continuous &mdash; one file, idle included</label>
+    <label class="inline"><input type="radio" name="mode" value="monitor">
+      Monitor &mdash; one file per burst, idle not recorded</label>
+  </div>
   <form id="capture-form" class="grid">
     <label>Rate <input name="rate" value="2M" required></label>
     <label>Channels
@@ -50,8 +56,9 @@
       </select>
     </label>
     <label>Base GPIO <input name="base_gpio" value="2"></label>
-    <label>Max duration <input name="duration" value="60s" required></label>
-    <label>Idle stop <input name="idle_stop" value="1s" placeholder="empty = off"></label>
+    <label>Max duration <input name="duration" placeholder="empty = until Stop"></label>
+    <label>Silence timeout <input name="silence_timeout" placeholder="empty = off"></label>
+    <label>Max size <input name="max_size" placeholder="4G"></label>
     <label>Trigger
       <select name="trigger">
         <option value="none">none</option>
@@ -60,15 +67,22 @@
     </label>
     <label>Trigger channel <input name="trigger_channel" value="0"></label>
     <label>DMA buffer <input name="dma_buf" placeholder="bytes, empty = 1 MiB"></label>
+    <label class="m-monitor hidden">Burst gap <input name="gap" placeholder="100ms"></label>
+    <label class="m-monitor hidden">Lead-in (pre) <input name="pre" placeholder="10ms"></label>
+    <label class="m-monitor hidden">Tail (post) <input name="post" placeholder="50ms"></label>
   </form>
   <div class="actions">
     <button id="start-capture" class="primary">Start capture</button>
     <button id="stop-job">Stop</button>
     <span id="job-state" class="state"></span>
   </div>
-  <p class="hint">Idle stop waits for the first change on any channel, then ends the
-     capture once the line has been quiet that long. Waiting is unlimited &mdash; press
-     Stop to give up.</p>
+  <p class="hint">The capture runs until you press Stop unless you set a limit. Samples are
+     written as they arrive, so length is bounded by disk space, not memory.
+     <strong>Silence timeout</strong> waits for the first change on any channel, then ends
+     the capture once the line has been quiet that long. <strong>Monitor</strong> keeps
+     sampling all the time but writes only the bursts: each one gets its own file with a
+     lead-in before the first change and a tail after the last, and the silence between
+     bursts is recorded in the index instead of on disk.</p>
 </section>
 
 <section class="panel">

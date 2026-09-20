@@ -34,6 +34,14 @@ static uint8_t last_level(const idle_scan_t *s, uint32_t w)
 
 bool idle_scan_words(idle_scan_t *s, const uint32_t *words, size_t n, size_t *change_end)
 {
+    size_t begin;
+
+    return idle_scan_range(s, words, n, &begin, change_end);
+}
+
+bool idle_scan_range(idle_scan_t *s, const uint32_t *words, size_t n, size_t *change_begin,
+                     size_t *change_end)
+{
     bool changed = false;
     size_t i;
 
@@ -47,7 +55,10 @@ bool idle_scan_words(idle_scan_t *s, const uint32_t *words, size_t n, size_t *ch
         if (words[i] == s->rep[s->level])
             continue;
         s->level = last_level(s, words[i]);
-        changed = true;
+        if (!changed) {
+            *change_begin = i;
+            changed = true;
+        }
         *change_end = i + 1;
     }
     return changed;

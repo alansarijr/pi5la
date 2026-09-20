@@ -12,12 +12,18 @@
 #include "capture.h"
 #include "generator.h"
 #include "idle.h"
+#include "record.h"
 #include "piolib.h"
 #include "srzip.h"
 #include "unpack.h"
 #include "util.h"
 
 #define EXIT_DROPPED 2
+
+#define DEFAULT_GAP "100ms"
+#define DEFAULT_PRE "10ms"
+#define DEFAULT_POST "50ms"
+#define DEFAULT_MAX_SIZE "4G"
 
 static volatile sig_atomic_t g_stop;
 
@@ -30,25 +36,32 @@ static void on_signal(int sig)
 static void usage(FILE *f)
 {
     fprintf(f,
-        "usage: pi5la --rate RATE --samples N|--duration T [--out FILE.sr] [--raw FILE]\n"
-        "             [--channels 1|2|4|8] [--base-gpio G]\n"
-        "             [--trigger rising|falling|high|low:N] [--mode dma|naive]\n"
-        "             [--generator FREQ] [--dma-buf BYTES] [--idle-stop T]\n"
+        "usage: pi5la --rate RATE --out FILE.sr [--silence-timeout T]\n"
+        "       pi5la --rate RATE --monitor DIR [--gap T] [--pre T] [--post T]\n"
+        "       pi5la --rate RATE --samples N --raw FILE [--mode naive]\n"
         "       pi5la --generator FREQ --generator-only\n"
         "       pi5la --rate RATE --stream [--channels N] [--trigger T:N] | sigrok-cli ...\n"
         "\n"
+        "Capture runs until Ctrl-C unless a limit is given. Samples are written as they\n"
+        "arrive, so length is bounded by disk space, not RAM.\n"
+        "\n"
         "  --rate RATE        sample rate, suffix k/M (200 MHz / integer+1/256 divider)\n"
-        "  --samples N        maximum samples to capture (suffix k/M allowed)\n"
-        "  --duration T       maximum capture time instead of --samples (500ms, 10s, 2m)\n"
-        "  --idle-stop T      wait for the first change on any channel (keeping about one\n"
-        "                     DMA period before it), then stop after T without a change;\n"
-        "                     checked once per DMA period, so stopping can lag by a period\n"
-        "  --out FILE.sr      write a sigrok session file\n"
-        "  --raw FILE         write the packed 32-bit FIFO words (native byte order)\n"
+        "  --out FILE.sr      write one sigrok session file\n"
+        "  --monitor DIR      record only while the bus is active: one .sr per burst in\n"
+        "                     DIR, plus index.json. Idle is never written\n"
+        "  --silence-timeout T  wait for the first change, then stop once the line has\n"
+        "                     been quiet for T (500ms, 10s, 2m)\n"
+        "  --gap T            silence that ends a burst, --monitor only (default %s)\n"
+        "  --pre T            lead-in kept before the first change (default %s)\n"
+        "  --post T           tail kept after the last change (default %s)\n"
+        "  --duration T       stop after T of samples (optional cap)\n"
+        "  --samples N        stop after N samples, suffix k/M (optional cap)\n"
+        "  --max-size BYTES   stop once this much sample data is written (default %s)\n"
+        "  --raw FILE         write the packed 32-bit FIFO words; needs --samples/--duration\n"
         "  --channels N       1, 2, 4 or 8 (default 8)\n"
         "  --base-gpio G      first capture GPIO (default 2)\n"
         "  --trigger T:N      wait for condition on channel N before sampling\n"
-        "  --mode M           dma (default) or naive (M2 baseline)\n"
+        "  --mode M           dma (default) or naive (M2 baseline, with --raw)\n"
         "  --generator FREQ   square wave on GPIO %d while capturing (loopback self-test)\n"
         "  --generator-only   run the generator until Ctrl-C, no capture (M1)\n"
         "  --stream           capture until Ctrl-C, writing samples to stdout as they\n"
@@ -56,8 +69,12 @@ static void usage(FILE *f)
         "                     sigrok-cli -I binary:numchannels=N:samplerate=RATE -i -\n"
         "  --dma-buf BYTES    cyclic DMA period size, ring of %d periods (default %u)\n"
         "\n"
+        "Silence, gap and size are checked once per DMA period, so a stop can lag by one\n"
+        "period (1 MiB = 1 M samples at 8 channels).\n"
+        "\n"
         "Exit status: 0 ok, 1 error, %d dropped samples detected.\n",
-        GENERATOR_DEFAULT_GPIO, CAPTURE_DMA_BUF_COUNT, CAPTURE_DMA_BUF_DEFAULT, EXIT_DROPPED);
+        DEFAULT_GAP, DEFAULT_PRE, DEFAULT_POST, DEFAULT_MAX_SIZE, GENERATOR_DEFAULT_GPIO,
+        CAPTURE_DMA_BUF_COUNT, CAPTURE_DMA_BUF_DEFAULT, EXIT_DROPPED);
 }
 
 static int write_raw(const char *path, const uint32_t *words, size_t n_words)
@@ -112,17 +129,47 @@ static void report(const capture_config_t *cfg, const capture_result_t *res, uin
         fprintf(stderr, "DMA ring overflow: host fell behind, capture stopped early\n");
     if (res->interrupted)
         fprintf(stderr, "capture interrupted\n");
-    if (cfg->idle_stop_s > 0) {
-        if (res->idle_discarded_bytes)
-            fprintf(stderr, "idle stop: discarded %" PRIu64 " idle samples before the first change\n",
-                    res->idle_discarded_bytes / 4 * unpack_samples_per_word(cfg->channels));
-        if (!res->activity_seen)
-            fprintf(stderr, "idle stop: no change seen on any channel\n");
-        else if (res->idle_stopped)
-            fprintf(stderr, "idle stop: stopped after %.3f s without a change\n", cfg->idle_stop_s);
+}
+
+/* The streaming path: unbounded capture, silence timeout and monitor mode. */
+static void report_stream(const capture_config_t *cfg, const record_opts_t *rec,
+                          const record_stats_t *st, const capture_stream_result_t *sres)
+{
+    double rate = clkdiv_hz(cfg->div);
+
+    fprintf(stderr, "\ncaptured %" PRIu64 " samples (%.3f s) in %.3f s, wrote %" PRIu64
+                    " sample bytes\n",
+            st->samples, rate > 0 ? st->samples / rate : 0.0, sres->total_s, st->written);
+    fprintf(stderr, "stall events: %" PRIu64 " (DMA periods with RXSTALL set)\n",
+            sres->stall_events);
+
+    if (rec->monitor_dir) {
+        double kept = st->samples ? 100.0 * st->written / st->samples : 0.0;
+
+        fprintf(stderr, "monitor: %u burst(s) in %s, %.2f%% of the time recorded\n",
+                st->bursts, rec->monitor_dir, kept);
+        if (!st->activity_seen)
+            fprintf(stderr, "monitor: no change seen on any channel: check the wiring\n");
+    } else if (rec->silence_s > 0) {
+        if (!st->activity_seen)
+            fprintf(stderr, "silence timeout: no change seen on any channel\n");
+        else if (st->silence_stopped)
+            fprintf(stderr, "silence timeout: stopped after %.3f s without a change\n",
+                    rec->silence_s);
         else
-            fprintf(stderr, "idle stop: sample limit reached before the line went idle\n");
+            fprintf(stderr, "silence timeout: stopped before the line went quiet\n");
     }
+    if (st->samples_cap_hit)
+        fprintf(stderr, "stopped at the sample limit\n");
+    if (st->size_cap_hit)
+        fprintf(stderr, "stopped at --max-size (%" PRIu64 " bytes)\n", rec->max_bytes);
+    if (sres->overflow)
+        fprintf(stderr, "DMA ring overflow: writing could not keep up. Lower --rate, use "
+                        "fewer --channels, or use --monitor so idle is not written.\n");
+    if (st->write_failed)
+        fprintf(stderr, "writing failed: the capture is incomplete\n");
+    if (sres->interrupted)
+        fprintf(stderr, "stopped by signal\n");
 }
 
 typedef struct {
@@ -186,12 +233,19 @@ static int check_dev_pio(void)
 
 int main(int argc, char **argv)
 {
-    enum { OPT_GEN_ONLY = 256, OPT_DMA_BUF, OPT_RAW, OPT_STREAM, OPT_DURATION, OPT_IDLE_STOP };
+    enum { OPT_GEN_ONLY = 256, OPT_DMA_BUF, OPT_RAW, OPT_STREAM, OPT_DURATION, OPT_IDLE_STOP,
+           OPT_SILENCE, OPT_MONITOR, OPT_GAP, OPT_PRE, OPT_POST, OPT_MAX_SIZE };
     static const struct option opts[] = {
         { "rate", required_argument, NULL, 'r' },
         { "samples", required_argument, NULL, 'n' },
         { "duration", required_argument, NULL, OPT_DURATION },
-        { "idle-stop", required_argument, NULL, OPT_IDLE_STOP },
+        { "silence-timeout", required_argument, NULL, OPT_SILENCE },
+        { "idle-stop", required_argument, NULL, OPT_IDLE_STOP },   /* old name */
+        { "monitor", required_argument, NULL, OPT_MONITOR },
+        { "gap", required_argument, NULL, OPT_GAP },
+        { "pre", required_argument, NULL, OPT_PRE },
+        { "post", required_argument, NULL, OPT_POST },
+        { "max-size", required_argument, NULL, OPT_MAX_SIZE },
         { "out", required_argument, NULL, 'o' },
         { "raw", required_argument, NULL, OPT_RAW },
         { "channels", required_argument, NULL, 'c' },
@@ -213,9 +267,11 @@ int main(int argc, char **argv)
         .dma_buf_bytes = CAPTURE_DMA_BUF_DEFAULT,
         .stop = &g_stop,
     };
+    record_opts_t rec = { 0 };
     const char *out_path = NULL, *raw_path = NULL;
     double rate = 0, gen_hz = 0, duration_s = 0;
     bool have_rate = false, have_samples = false, gen_only = false, stream = false;
+    bool buffered = false;
     stream_ctx_t sctx = { 0 };
     capture_result_t res = { 0 };
     generator_t gen = { .sm = -1 };
@@ -254,8 +310,38 @@ int main(int argc, char **argv)
             }
             break;
         case OPT_IDLE_STOP:
-            if (!parse_duration(optarg, &cfg.idle_stop_s)) {
-                fprintf(stderr, "invalid --idle-stop '%s' (e.g. 500ms, 2s)\n", optarg);
+            fprintf(stderr, "note: --idle-stop is now --silence-timeout\n");
+            /* fall through */
+        case OPT_SILENCE:
+            if (!parse_duration(optarg, &rec.silence_s)) {
+                fprintf(stderr, "invalid --silence-timeout '%s' (e.g. 500ms, 2s)\n", optarg);
+                return 1;
+            }
+            break;
+        case OPT_MONITOR:
+            rec.monitor_dir = optarg;
+            break;
+        case OPT_GAP:
+            if (!parse_duration(optarg, &rec.gap_s)) {
+                fprintf(stderr, "invalid --gap '%s' (e.g. 100ms, 1s)\n", optarg);
+                return 1;
+            }
+            break;
+        case OPT_PRE:
+            if (!parse_duration(optarg, &rec.pre_s)) {
+                fprintf(stderr, "invalid --pre '%s' (e.g. 10ms)\n", optarg);
+                return 1;
+            }
+            break;
+        case OPT_POST:
+            if (!parse_duration(optarg, &rec.post_s)) {
+                fprintf(stderr, "invalid --post '%s' (e.g. 50ms)\n", optarg);
+                return 1;
+            }
+            break;
+        case OPT_MAX_SIZE:
+            if (!parse_si_u64(optarg, &rec.max_bytes) || rec.max_bytes == 0) {
+                fprintf(stderr, "invalid --max-size '%s' (bytes, suffix k/M/G)\n", optarg);
                 return 1;
             }
             break;
@@ -332,11 +418,11 @@ int main(int argc, char **argv)
                 fprintf(stderr, "--stream needs --rate\n");
                 return 1;
             }
-            if (have_samples || duration_s > 0 || cfg.idle_stop_s > 0 || out_path || raw_path ||
-                cfg.mode != CAPTURE_DMA) {
+            if (have_samples || duration_s > 0 || rec.silence_s > 0 || rec.monitor_dir ||
+                out_path || raw_path || cfg.mode != CAPTURE_DMA) {
                 fprintf(stderr, "--stream runs until Ctrl-C and writes to stdout: "
-                                "don't combine it with --samples, --duration, --idle-stop, "
-                                "--out, --raw or --mode naive\n");
+                                "don't combine it with --samples, --duration, "
+                                "--silence-timeout, --monitor, --out, --raw or --mode naive\n");
                 return 1;
             }
             if (isatty(STDOUT_FILENO)) {
@@ -351,8 +437,12 @@ int main(int argc, char **argv)
                 fprintf(stderr, "give either --samples or --duration, not both\n");
                 return 1;
             }
-            if (!have_rate || (!have_samples && duration_s <= 0) || (!out_path && !raw_path)) {
+            if (!have_rate || (!out_path && !raw_path && !rec.monitor_dir)) {
                 usage(stderr);
+                return 1;
+            }
+            if (out_path && rec.monitor_dir) {
+                fprintf(stderr, "give either --out or --monitor, not both\n");
                 return 1;
             }
             if (duration_s > 0) {
@@ -363,10 +453,35 @@ int main(int argc, char **argv)
                     return 1;
                 }
                 cfg.samples = (uint64_t)n;
+                have_samples = true;
             }
-            if (cfg.idle_stop_s > 0 && cfg.mode != CAPTURE_DMA) {
-                fprintf(stderr, "--idle-stop needs --mode dma\n");
-                return 1;
+            /* The old in-RAM path still serves --raw and the naive baseline. */
+            buffered = raw_path != NULL || cfg.mode != CAPTURE_DMA;
+            if (buffered) {
+                if (!have_samples) {
+                    fprintf(stderr, "%s needs --samples or --duration\n",
+                            raw_path ? "--raw" : "--mode naive");
+                    return 1;
+                }
+                if (rec.silence_s > 0 || rec.monitor_dir) {
+                    fprintf(stderr, "--silence-timeout and --monitor need DMA mode "
+                                    "without --raw\n");
+                    return 1;
+                }
+            } else {
+                if (!rec.gap_s && !parse_duration(DEFAULT_GAP, &rec.gap_s))
+                    return 1;
+                if (!rec.pre_s && !parse_duration(DEFAULT_PRE, &rec.pre_s))
+                    return 1;
+                if (!rec.post_s && !parse_duration(DEFAULT_POST, &rec.post_s))
+                    return 1;
+                if (!rec.max_bytes && !parse_si_u64(DEFAULT_MAX_SIZE, &rec.max_bytes))
+                    return 1;
+                rec.out_path = out_path;
+                rec.max_samples = have_samples ? cfg.samples : 0;
+                if (rec.monitor_dir && rec.silence_s > 0 && rec.silence_s < rec.gap_s)
+                    fprintf(stderr, "note: --silence-timeout is shorter than --gap, so the "
+                                    "capture stops before a burst can close\n");
             }
         }
         if (cfg.base_gpio + cfg.channels > CAPTURE_GPIO_COUNT) {
@@ -442,6 +557,35 @@ int main(int argc, char **argv)
             exit_code = EXIT_DROPPED;
         else
             exit_code = sctx.write_failed && !sres.interrupted ? 1 : 0;
+        goto out;
+    }
+
+    if (!buffered) {
+        capture_stream_result_t sres;
+        record_stats_t rstats;
+        int rret;
+
+        fprintf(stderr, "capturing %u ch at %.3f Hz on GPIO %u..%u%s\n", cfg.channels,
+                clkdiv_hz(cfg.div), cfg.base_gpio, cfg.base_gpio + cfg.channels - 1,
+                rec.max_samples ? "" : " until Ctrl-C");
+        if (rec.monitor_dir)
+            fprintf(stderr, "monitor: writing bursts to %s (gap %.3f s, pre %.3f s, "
+                            "post %.3f s); idle is not recorded\n",
+                    rec.monitor_dir, rec.gap_s, rec.pre_s, rec.post_s);
+        else if (rec.silence_s > 0)
+            fprintf(stderr, "waiting for the first change, then stopping after %.3f s "
+                            "of silence\n", rec.silence_s);
+
+        rret = record_run(pio, &cfg, &rec, &rstats, &sres);
+        if (gen.sm >= 0)
+            generator_stop(&gen);
+        report_stream(&cfg, &rec, &rstats, &sres);
+        if (rret)
+            goto out;
+        if (sres.stall_events > 0 || sres.overflow)
+            exit_code = EXIT_DROPPED;
+        else
+            exit_code = 0;
         goto out;
     }
 

@@ -24,6 +24,10 @@ bool parse_si(const char *s, double *out)
         v *= 1e6;
         end++;
         break;
+    case 'G':
+        v *= 1e9;
+        end++;
+        break;
     default:
         break;
     }

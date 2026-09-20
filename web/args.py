@@ -21,6 +21,8 @@ MAX_DMA_BUF = 8 << 20      # 4 x 8 MiB is the largest ring the 64 MB CMA pool al
 RELIABLE_BYTES_PER_S = 50e6  # see REPORT.md: 50 MB/s packed ran clean 15/15
 
 CAPTURE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.sr$")
+MONITOR_DIR_RE = re.compile(r"^mon-\d{8}-\d{6}$")
+DEFAULTS = {"gap": "100ms", "pre": "10ms", "post": "50ms", "max_size": "4G"}
 TRIGGERS = ("rising", "falling", "high", "low")
 PROTOCOLS = ("uart", "i2c", "spi")
 
@@ -34,7 +36,7 @@ def _fail(what, value):
 
 
 def parse_si(text, what="rate"):
-    """Number with an optional k/M suffix, as src/util.c parse_si does."""
+    """Number with an optional k/M/G suffix, as src/util.c parse_si does."""
     if not isinstance(text, str):
         _fail(what, text)
     s = text.strip()
@@ -43,6 +45,8 @@ def parse_si(text, what="rate"):
         mult, s = 1e3, s[:-1]
     elif s.endswith("M"):
         mult, s = 1e6, s[:-1]
+    elif s.endswith("G"):
+        mult, s = 1e9, s[:-1]
     if not re.fullmatch(r"\d+(\.\d+)?", s):
         _fail(what, text)
     return float(s) * mult
@@ -68,6 +72,13 @@ def parse_duration(text, what="duration"):
     return value
 
 
+def _flag(value):
+    """Checkbox-ish value from JSON: true, "true", "on", 1."""
+    if isinstance(value, bool):
+        return value
+    return str(value).strip().lower() in ("true", "on", "1", "yes")
+
+
 def _int(value, what, lo, hi):
     try:
         n = int(str(value).strip())
@@ -84,11 +95,33 @@ def new_capture_name(now=None):
     return now.strftime("cap-%Y%m%d-%H%M%S.sr")
 
 
+def new_monitor_dir(now=None):
+    """Directory for one monitor session: burst-NNNN.sr files plus index.json."""
+    now = now or datetime.datetime.now()
+    return now.strftime("mon-%Y%m%d-%H%M%S")
+
+
 def safe_capture_name(name):
     """A plain *.sr basename, with no path separators or traversal."""
     if not isinstance(name, str) or not CAPTURE_NAME_RE.fullmatch(name) or name.startswith("."):
         _fail("capture name", name)
     return name
+
+
+def safe_capture_ref(ref):
+    """
+    A capture the browser may name: either a plain "<file>.sr" or one burst
+    inside a monitor session, "mon-YYYYmmdd-HHMMSS/<file>.sr". Anything else,
+    including separators or traversal, is rejected.
+    """
+    if not isinstance(ref, str):
+        _fail("capture name", ref)
+    parts = ref.split("/")
+    if len(parts) == 1:
+        return safe_capture_name(parts[0])
+    if len(parts) == 2 and MONITOR_DIR_RE.fullmatch(parts[0]):
+        return "%s/%s" % (parts[0], safe_capture_name(parts[1]))
+    _fail("capture name", ref)
 
 
 def throughput_warning(rate_hz, channels):
@@ -106,8 +139,11 @@ def capture_command(form, pi5la="pi5la", out_path="capture.sr"):
     """
     Build the pi5la argv for a capture.
 
-    form keys: rate (required), channels, base_gpio, duration (required),
-    idle_stop, trigger, trigger_channel, dma_buf. Returns (argv, warnings).
+    The capture runs until stopped unless a cap is given, so `duration` is
+    optional. form keys: rate (required), channels, base_gpio, duration,
+    silence_timeout, monitor (bool), gap, pre, post, max_size, trigger,
+    trigger_channel, dma_buf. `out_path` is the .sr file, or the session
+    directory when monitoring. Returns (argv, warnings).
     """
     rate_hz = parse_si(form.get("rate", ""), "rate")
     if rate_hz < MIN_RATE_HZ or rate_hz > PIO_CLOCK_HZ:
@@ -123,21 +159,36 @@ def capture_command(form, pi5la="pi5la", out_path="capture.sr"):
         raise InvalidInput(
             "GPIO %d..%d is past the last PIO GPIO (%d)" % (base, base + channels - 1, MAX_GPIO - 1))
 
-    duration_s = parse_duration(form.get("duration", ""), "duration")
-
+    monitor = _flag(form.get("monitor"))
     argv = [
         pi5la,
         "--rate", form["rate"].strip(),
         "--channels", str(channels),
         "--base-gpio", str(base),
-        "--duration", form["duration"].strip(),
-        "--out", out_path,
+        "--monitor" if monitor else "--out", out_path,
     ]
 
-    idle = form.get("idle_stop", "")
-    if idle and idle.strip():
-        parse_duration(idle, "idle stop")   # validate only; pi5la parses it again
-        argv += ["--idle-stop", idle.strip()]
+    duration_s = 0.0
+    duration = form.get("duration", "")
+    if duration and duration.strip():
+        duration_s = parse_duration(duration, "duration")
+        argv += ["--duration", duration.strip()]
+
+    silence = form.get("silence_timeout", "")
+    if silence and silence.strip():
+        parse_duration(silence, "silence timeout")   # pi5la parses it again
+        argv += ["--silence-timeout", silence.strip()]
+
+    if monitor:
+        for key, flag in (("gap", "--gap"), ("pre", "--pre"), ("post", "--post")):
+            value = form.get(key, "") or DEFAULTS[key]
+            parse_duration(value, key)
+            argv += [flag, value.strip()]
+
+    max_size = form.get("max_size", "") or DEFAULTS["max_size"]
+    if parse_si(max_size, "max size") <= 0:
+        _fail("max size", max_size)
+    argv += ["--max-size", max_size.strip()]
 
     trigger = form.get("trigger", "")
     if trigger and trigger.strip() and trigger != "none":
@@ -159,8 +210,13 @@ def capture_command(form, pi5la="pi5la", out_path="capture.sr"):
     warning = throughput_warning(rate_hz, channels)
     if warning:
         warnings.append(warning)
-    if duration_s * rate_hz * channels / 8 > 2e9:
-        warnings.append("this capture needs over 2 GB of RAM on the Pi; shorten the duration.")
+    disk_rate = rate_hz * channels / 8.0
+    if not monitor and disk_rate > 20e6:
+        warnings.append(
+            "continuous recording writes %.0f MB/s to the SD card, which it may not "
+            "sustain; use monitor mode or a lower rate." % (disk_rate / 1e6))
+    if duration_s and not monitor and duration_s * disk_rate > 4e9:
+        warnings.append("this capture would write over 4 GB; --max-size will stop it first.")
     return argv, warnings
 
 

@@ -14,7 +14,7 @@ typedef struct {
 } clkdiv_t;
 
 /*
- * Parse a number with an optional k / M suffix ("10M", "115.2k", "4000").
+ * Parse a number with an optional k / M / G suffix ("10M", "115.2k", "4G").
  * Returns false on malformed input or negative values.
  */
 bool parse_si(const char *s, double *out);

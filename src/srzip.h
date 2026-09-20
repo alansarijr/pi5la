@@ -16,6 +16,14 @@
 int srzip_write(const char *path, const uint8_t *samples, size_t n_samples,
                 uint64_t samplerate_hz, unsigned channels, const char *const *probe_names);
 
+/*
+ * Same file, but logic-1 is copied from an existing payload file (one byte per
+ * sample) instead of a memory buffer, so an unbounded capture never holds the
+ * samples in RAM. Returns 0 or -1.
+ */
+int srzip_write_file(const char *path, const char *payload_path, uint64_t samplerate_hz,
+                     unsigned channels, const char *const *probe_names);
+
 /* "10 MHz", "115200 Hz", "3 kHz" — the largest unit that divides exactly. */
 void srzip_format_samplerate(uint64_t hz, char *buf, size_t len);
 

@@ -37,7 +37,8 @@ open in PulseView, and can listen to a UART live.
 | M7 Hardware trigger | ✅ |
 | M8 RLE / pre-trigger | Not started (skipped by agreement) |
 | Extra: live UART listening | ✅ verified on the Pi (2026-09-19): text decoded live, 0 stalls |
-| Extra: `--duration` / `--idle-stop` | ✅ verified on the Pi (2026-09-19): capture stops 1 s after the signal ends |
+| Extra: `--silence-timeout` | ✅ verified on the Pi (2026-09-19, then named `--idle-stop`): capture stops 1 s after the signal ends |
+| Extra: unbounded capture + `--monitor` | Built 2026-09-21, host-tested. **Not yet run on the Pi** |
 
 ---
 
@@ -149,15 +150,18 @@ All programs are in `~/build-pi5la/`.
 ### Capture to a file (opens in PulseView)
 
 ```bash
-pi5la --rate 10M --samples 10000000 --out capture.sr
+pi5la --rate 10M --out capture.sr        # until Ctrl-C; samples stream to disk
 pulseview capture.sr
 ```
 
 | Option | Meaning |
 |---|---|
 | `--rate` | Sample rate, e.g. `2M`, `10M`, `50M` (max 200M) |
-| `--samples` | Number of samples. At 10M, 10 000 000 is 1 second |
-| `--out` / `--raw` | sigrok `.sr` file / raw packed words |
+| `--silence-timeout 1s` | Wait for traffic, then stop once the line is quiet |
+| `--monitor DIR` | Record only bursts of traffic: one `.sr` each, plus `index.json` |
+| `--duration` / `--samples` | Optional caps; without them the capture runs until stopped |
+| `--max-size 4G` | Stop once this much sample data is written |
+| `--out` / `--raw` | sigrok `.sr` file / raw packed words (`--raw` needs a cap) |
 | `--channels 1\|2\|4\|8` | Fewer channels allow higher rates |
 | `--trigger rising:0` | Wait for `rising`, `falling`, `high` or `low` on channel N |
 | `--generator 100k` | Test square wave on GPIO 20 during capture |
@@ -249,7 +253,8 @@ tests/              host unit tests (ctest)
 ## 7. Still to do
 
 - [x] Run the live `uart-listen.sh` on the Pi (2026-09-19): decoded `hello live` as it arrived.
-- [x] `--duration` and `--idle-stop` (2026-09-19): capture ends itself when the line goes quiet.
+- [x] `--duration` and `--silence-timeout` (2026-09-19): capture ends itself when the line goes quiet.
+- [ ] Unbounded capture (streaming to disk) and `--monitor` burst recording: run them on the Pi.
 - [ ] Confirm the PulseView visual decode of `uart.sr` (M6).
 - [x] Confirm the stock `piopwm` example runs cleanly (M0, 2026-09-17, on GPIO 20).
 - [ ] ESP32 UART test **through a 74LVC245 buffer** with a shared GND.

@@ -194,14 +194,15 @@ def create_app(runner):
     @app.post("/api/capture")
     def start_capture():
         form = request.get_json(silent=True) or {}
-        name = argbuild.new_capture_name()
+        monitor = argbuild._flag(form.get("monitor"))
+        name = argbuild.new_monitor_dir() if monitor else argbuild.new_capture_name()
         out_path = os.path.join(runner.captures_dir, name)
         try:
             argv, warnings = argbuild.capture_command(form, runner.pi5la, out_path)
         except argbuild.InvalidInput as e:
             return jsonify(error=str(e)), 400
 
-        job = Job("capture", argv, out_name=name)
+        job = Job("monitor" if monitor else "capture", argv, out_name=name)
 
         def pipeline(job):
             proc = _spawn(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT)
@@ -290,41 +291,86 @@ def create_app(runner):
                         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
     # --- captures -------------------------------------------------------
+    def read_index(session_dir):
+        """A monitor session's index.json, or None if it isn't written yet."""
+        try:
+            with open(os.path.join(session_dir, "index.json"), "r") as f:
+                return json.load(f)
+        except (OSError, ValueError):
+            return None
+
     @app.get("/api/captures")
     def list_captures():
         items = []
         for name in sorted(os.listdir(runner.captures_dir), reverse=True):
-            if not name.endswith(".sr"):
-                continue
-            st = os.stat(os.path.join(runner.captures_dir, name))
-            items.append({"name": name, "size": st.st_size, "mtime": st.st_mtime})
+            path = os.path.join(runner.captures_dir, name)
+            if name.endswith(".sr") and os.path.isfile(path):
+                st = os.stat(path)
+                items.append({"kind": "file", "name": name, "size": st.st_size,
+                              "mtime": st.st_mtime})
+            elif argbuild.MONITOR_DIR_RE.fullmatch(name) and os.path.isdir(path):
+                index = read_index(path) or {}
+                bursts = []
+                for b in index.get("bursts", []):
+                    burst_path = os.path.join(path, b.get("file", ""))
+                    if not os.path.isfile(burst_path):
+                        continue
+                    bursts.append({
+                        "name": "%s/%s" % (name, b["file"]),
+                        "size": os.stat(burst_path).st_size,
+                        "start_time": b.get("start_time"),
+                        "duration_s": b.get("duration_s"),
+                        "gap_before_s": b.get("gap_before_s"),
+                    })
+                items.append({"kind": "monitor", "name": name,
+                              "mtime": os.stat(path).st_mtime,
+                              "size": sum(b["size"] for b in bursts),
+                              "samplerate_hz": index.get("samplerate_hz"),
+                              "channels": index.get("channels"),
+                              "bursts": bursts})
         return jsonify(captures=items)
 
-    @app.get("/api/captures/<name>")
-    def download(name):
+    @app.get("/api/captures/<path:ref>")
+    def download(ref):
         try:
-            safe = argbuild.safe_capture_name(name)
+            safe = argbuild.safe_capture_ref(ref)
         except argbuild.InvalidInput as e:
             return jsonify(error=str(e)), 400
         return send_from_directory(runner.captures_dir, safe, as_attachment=True)
 
-    @app.delete("/api/captures/<name>")
-    def delete(name):
+    def remove(safe):
+        """Delete one capture, or a whole monitor session directory."""
+        path = os.path.join(runner.captures_dir, safe)
         try:
-            safe = argbuild.safe_capture_name(name)
-        except argbuild.InvalidInput as e:
-            return jsonify(error=str(e)), 400
-        try:
-            os.remove(os.path.join(runner.captures_dir, safe))
+            if os.path.isdir(path):
+                for entry in os.listdir(path):
+                    os.remove(os.path.join(path, entry))
+                os.rmdir(path)
+            else:
+                os.remove(path)
         except FileNotFoundError:
             return jsonify(error="no such capture"), 404
         return jsonify(deleted=safe)
+
+    @app.delete("/api/captures/<path:ref>")
+    def delete(ref):
+        try:
+            safe = argbuild.safe_capture_ref(ref)
+        except argbuild.InvalidInput as e:
+            return jsonify(error=str(e)), 400
+        return remove(safe)
+
+    @app.delete("/api/sessions/<name>")
+    def delete_session(name):
+        if not argbuild.MONITOR_DIR_RE.fullmatch(name or ""):
+            return jsonify(error="invalid session name"), 400
+        return remove(name)
 
     @app.post("/api/decode")
     def decode():
         form = request.get_json(silent=True) or {}
         try:
-            safe = argbuild.safe_capture_name(form.get("name", ""))
+            safe = argbuild.safe_capture_ref(form.get("name", ""))
             channels = int(form.get("channels", 8))
             base = int(form.get("base_gpio", 2))
             argv = argbuild.decode_command(os.path.join(runner.captures_dir, safe), form,

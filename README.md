@@ -53,8 +53,8 @@ One DIP-20 74LVC245 covers all 8 channels. Chip pin → Pi pin, in channel order
 
 Chip pin 20 = VCC (Pi pin 1, 3.3 V), pin 10 = GND, pin 1 = DIR to 3.3 V (A→B),
 pin 19 = /OE to GND. **Tie unused A inputs to GND**: a floating CMOS input
-reads as noise, which looks like a busy channel and keeps `--idle-stop` from
-ever firing.
+reads as noise, which looks like a busy channel and keeps `--silence-timeout`
+and `--monitor` from ever seeing the line go quiet.
 
 ---
 
@@ -167,23 +167,34 @@ even pins the outer row, and pin 1 is the square pad. The same table is in
 `PROJECT_SUMMARY.md`; `--channels N` keeps channels 0..N-1 and drops the rest.
 
 ```
-pi5la --rate 10M --samples 1000000 --out capture.sr
-pi5la --rate 10M --duration 30s --idle-stop 1s --out capture.sr
-      [--channels 8] [--base-gpio 2]
-      [--trigger rising:0] [--mode dma|naive]
-      [--generator 100k] [--raw words.bin] [--dma-buf 1048576]
+pi5la --rate 2M --out capture.sr                       # until Ctrl-C
+pi5la --rate 2M --out capture.sr --silence-timeout 1s  # stop when it goes quiet
+pi5la --rate 2M --monitor ~/captures/mon1              # bursts only, idle skipped
+      [--gap 100ms] [--pre 10ms] [--post 50ms]
+      [--channels 8] [--base-gpio 2] [--trigger rising:0]
+      [--duration 60s] [--samples N] [--max-size 4G] [--dma-buf 1048576]
+pi5la --rate 10M --samples 1000000 --raw words.bin [--mode naive]
 pi5la --generator 1 --generator-only
 pi5la --rate 2M --stream [--channels 8] [--trigger falling:0] | <decoder>
 ```
 
+**The capture runs until you stop it** unless you give a limit. Samples are
+written to disk as they arrive, so length is bounded by disk space, not RAM,
+and Ctrl-C always leaves a readable `.sr`.
+
 | Option | Meaning |
 |---|---|
 | `--rate` | Sample rate with `k`/`M` suffix. Rate = 200 MHz / divider; the divider is an integer plus a 1/256 fraction. Fractional dividers add jitter, so pi5la prints a note when one is used. |
-| `--samples` | Maximum number of samples to capture. The whole capture is held in RAM (about 2 bytes per sample at 8 channels) before the `.sr` file is written. Ctrl-C stops early and still saves what was captured. |
-| `--duration` | Maximum capture time instead of `--samples`: `500ms`, `10s`, `2m`, or plain seconds. Samples = rate × time. |
-| `--idle-stop` | Auto-stop, DMA file capture only. Waits for the first level change on any captured channel, keeping about one DMA period (up to two) of idle lead-in before it and discarding older idle data. After that, stops once this long passes with no change and keeps that much idle tail. `--samples`/`--duration` still cap the capture; the wait before the first change doesn't count towards it (Ctrl-C to abort). Checked once per DMA period, so stopping can lag by one period (1 MiB = 1 M samples at 8 channels, 1 s at 1 MSa/s). Every captured channel counts: tie unused buffer inputs to GND or they may never go idle. |
-| `--out` | sigrok `.sr` output. |
-| `--raw` | The packed 32-bit FIFO words, as received. Used for M4 analysis. |
+| `--out` | sigrok `.sr` output, written continuously. |
+| `--monitor DIR` | Record only while the bus is active: one `.sr` per burst in `DIR`, plus `index.json`. Sampling never stops; idle is simply not written, so a quiet hour costs nothing. |
+| `--silence-timeout` | Wait for the first level change on any captured channel, keeping `--pre` of lead-in, then stop once the line has been quiet this long. Every captured channel counts: tie unused buffer inputs to GND or they may never go quiet. |
+| `--gap` | Silence that ends a burst, `--monitor` only (default 100 ms). |
+| `--pre` | Lead-in kept before the first change (default 10 ms). Pulled from a small RAM ring, so the start of a transmission is never clipped. |
+| `--post` | Tail kept after the last change (default 50 ms). |
+| `--duration` | Optional cap: stop after this much time (`500ms`, `10s`, `2m`). |
+| `--samples` | Optional cap: stop after this many samples. Required with `--raw` or `--mode naive`, which capture into RAM. |
+| `--max-size` | Stop once this much sample data is written (default 4G; suffix k/M/G). |
+| `--raw` | The packed 32-bit FIFO words, as received. Used for M4 analysis; needs `--samples`/`--duration`. |
 | `--channels` | 1, 2, 4 or 8. The PIO program is `in pins, N`, which packs 32/N samples per word. |
 | `--base-gpio` | First capture GPIO. Pins must be consecutive (default 2). |
 | `--trigger` | `rising`, `falling`, `high` or `low`, then `:N` with N relative to base. |
@@ -206,27 +217,51 @@ drop report go to stderr:
 
 ### Stopping by itself
 
-`--duration` sets the maximum capture time and `--idle-stop` ends the capture
-once the line has been quiet for a while, so a recording of one transmission
-needs no Ctrl-C:
+`--silence-timeout` ends the capture once the line has been quiet for a while,
+so a recording of one transmission needs no Ctrl-C:
 
 ```bash
-pi5la --rate 1M --duration 60s --idle-stop 1s --out capture.sr
+pi5la --rate 2M --out capture.sr --silence-timeout 1s
 ```
 
-**Verified on the Pi (2026-09-19)**, with the generator standing in for a
-device (jumper pin 38 → pin 3). A 1 kHz signal was started 3 s into the
-capture and stopped 3 s later:
+It waits for the first change (the wait writes nothing but the `--pre`
+lead-in), records, and stops after the line has been silent that long.
+
+*(This option was called `--idle-stop` until 2026-09-21. The old name still
+works and prints a note.)*
+
+### Monitoring a bus: `--monitor`
+
+For watching a bus over hours, recording idle would cost 1 byte per sample
+whatever happens: 8 channels at 2 MSa/s is 7.2 GB/hour of nothing. Monitor mode
+keeps sampling all the time but writes only the bursts:
 
 ```bash
-( sleep 3; timeout 3 ./pi5la --generator 1k --generator-only ) & \
-    ./pi5la --rate 1M --duration 60s --idle-stop 1s --out idle.sr
+pi5la --rate 2M --monitor ~/captures/mon1 --gap 100ms --pre 10ms --post 50ms
 ```
 
-The capture ended on its own after 7.341 s with exit code 0: 1 048 576 idle
-samples discarded while waiting, 5 952 852 samples kept (about two DMA periods
-of lead-in, the 3 s signal, and the 1 s idle tail), 0 stall events, and
-`idle stop: stopped after 1.000 s without a change`.
+```
+~/captures/mon1/
+    index.json      rate, channels, and for each burst: start_sample,
+                    start_time (wall clock), duration_s, gap_before_s
+    burst-0001.sr
+    burst-0002.sr
+```
+
+- **Nothing is missed.** The DMA capture never pauses; every period is scanned
+  for a change, and the lead-in ring means a burst file starts *before* the
+  first edge, not after it.
+- **Timing stays honest.** Each file is continuous, so decoders and time
+  measurements inside it are correct. The silence between bursts is recorded in
+  `index.json` as `gap_before_s` rather than as gigabytes of unchanging bytes.
+- A protocol that pauses for longer than `--gap` splits into two files, so
+  raise `--gap` if one transaction is being cut in half.
+
+Decode one burst exactly like any other capture:
+
+```bash
+sigrok-cli -i ~/captures/mon1/burst-0001.sr -P uart:rx=GPIO2:baudrate=115200 -B uart=rx
+```
 
 ### Live UART listening
 
@@ -251,8 +286,9 @@ names channels `0`–`7`, not `GPIO2`–`GPIO9`.
 ```
 
 printed `hello live` as it arrived, streaming 15 728 640 samples in 7.865 s
-with 0 stall events. `--idle-stop` was confirmed on the same wiring:
-`pi5la --rate 2M --duration 60s --idle-stop 1s --out uart_idle.sr` ended by
+with 0 stall events. The silence timeout was confirmed on the same wiring
+(as `--idle-stop`, its name then):
+`pi5la --rate 2M --duration 60s --silence-timeout 1s --out uart_idle.sr` ended by
 itself 4.196 s in, exit 0, and sigrok decoded the line byte-exact.
 
 sigrok's decoders run in Python and may not keep up with high sample rates.
@@ -300,10 +336,11 @@ Then open `http://<pi-address>:8080`. Options: `--host`, `--port`,
 
 What the page does:
 
-- **Capture** — rate, channels, base GPIO, max duration, idle stop, trigger and
+- **Capture** — continuous or monitor mode, rate, channels, base GPIO, silence
+  timeout, optional caps, trigger and
   DMA buffer, with presets for UART, I²C and SPI. Start and Stop; Stop sends
   SIGINT, so pi5la still writes the partial file. pi5la's own output (stall
-  events, throughput, `idle stop: …`) streams into the page, and rates above
+  events, throughput, `silence timeout: …`, bursts) streams into the page, and rates above
   the proven 50 MB/s show a warning.
 - **Live decode** — `pi5la --stream` piped into `sigrok-cli`, the same pipeline
   as `uart-listen`, with the decoded bytes appended as they arrive.

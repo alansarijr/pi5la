@@ -32,6 +32,14 @@ void idle_scan_init(idle_scan_t *s, unsigned channels);
 bool idle_scan_words(idle_scan_t *s, const uint32_t *words, size_t n, size_t *change_end);
 
 /*
+ * As idle_scan_words, but *change_begin also receives the index of the first
+ * word containing a change. Burst capture needs it to know where in the period
+ * the traffic started, so the lead-in can be measured from there.
+ */
+bool idle_scan_range(idle_scan_t *s, const uint32_t *words, size_t n, size_t *change_begin,
+                     size_t *change_end);
+
+/*
  * Parse a duration: a number with an optional ms / s / m suffix ("500ms",
  * "10s", "1.5m"); no suffix means seconds. Must be > 0.
  */
