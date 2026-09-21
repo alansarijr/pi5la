@@ -88,13 +88,17 @@ if(NOT PI5LA_TESTS_ONLY)
     add_executable(fdebugtest tools/fdebugtest.c)
     target_link_libraries(fdebugtest PRIVATE pi5la_hw)
 
-    # Helper scripts, placed next to pi5la in the build directory.
-    file(COPY tools/sr2es.py DESTINATION ${CMAKE_CURRENT_BINARY_DIR}
-        FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
-                         WORLD_READ WORLD_EXECUTE)
-    file(COPY tools/uart-listen.sh DESTINATION ${CMAKE_CURRENT_BINARY_DIR}
-        FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
-                         WORLD_READ WORLD_EXECUTE)
+    # Helper scripts, placed next to pi5la in the build directory. file(COPY)
+    # sets the executable bit; the configure_file() calls exist only to make
+    # CMake re-run (and so re-copy) when a script changes, since otherwise a
+    # plain `cmake --build` would leave a stale copy behind.
+    foreach(script tools/sr2es.py tools/uart-listen.sh)
+        get_filename_component(script_name ${script} NAME)
+        configure_file(${script} ${CMAKE_CURRENT_BINARY_DIR}/.stamp-${script_name} COPYONLY)
+        file(COPY ${script} DESTINATION ${CMAKE_CURRENT_BINARY_DIR}
+            FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
+                             WORLD_READ WORLD_EXECUTE)
+    endforeach()
 
     # record.c drives the streaming/monitor logic; the test stubs capture_stream,
     # so it compiles record.c directly instead of linking pi5la_hw.
