@@ -44,7 +44,8 @@ import urllib.request
 
 INDEX = "wiresploit-poc1"
 PROTOCOL = "UART"            # uppercase, like the "TCP" documents in the index
-EVENT_TYPE = "serial"
+EVENT_TYPE = "onboard"       # what the index's existing UART documents use
+DEFAULT_UART_TYPE = "TTL-3V3"   # what the 74LVC245 buffer feeds the Pi
 MAX_PAYLOAD_HEX = 64 * 1024      # 32 kB of bytes; longer messages are truncated
 MAX_TEXT = 2000                  # psf.text stays well under the 8191 ignore_above
 DEFAULT_GAP_BYTES = 10.0         # idle byte-times that end a message
@@ -275,32 +276,35 @@ def build_document(message, start_time, rate_hz, opts, extra_psf):
     if truncated:
         hex_payload = hex_payload[:MAX_PAYLOAD_HEX]
 
-    # Same shape as the network documents already in the index: a few keys on
-    # psf, with the protocol's own fields nested under psf.psd.
-    uart = {
-        "baud": opts.baud,
-        "channel": opts.channel,
-        "gpio": opts.base_gpio + opts.channel,
+    # Same shape as the UART documents already in this index: psd is flat, with
+    # uart_type / port / baud_rate / framing_error. Everything specific to a
+    # logic-analyzer capture goes under psd.capture, where it cannot clash.
+    psd = {
+        "uart_type": opts.uart_type,
+        "port": opts.port or ("ch%d" % opts.channel),
+        "baud_rate": opts.baud,
         "data_bits": 8,
         "parity": "none",
         "stop_bits": 1,
-        "byte_count": len(payload),
-        "text": printable(payload),
+        "framing_error": bool(errors),
+        "capture": {
+            "channel": opts.channel,
+            "gpio": opts.base_gpio + opts.channel,
+            "byte_count": len(payload),
+            "text": printable(payload),
+            "file": os.path.basename(opts.current_file),
+            "start_sample": first["start"],
+            "end_sample": last["end"],
+            "samplerate_hz": int(rate_hz),
+        },
     }
     if errors:
-        uart["errors"] = errors[:20]
-
-    capture = {
-        "file": os.path.basename(opts.current_file),
-        "start_sample": first["start"],
-        "end_sample": last["end"],
-        "samplerate_hz": int(rate_hz),
-    }
-    capture.update({k: v for k, v in extra_psf.items() if v is not None})
-
-    psf = {"psd": {"uart": uart, "capture": capture}}
+        psd["capture"]["errors"] = errors[:20]
     if truncated:
-        psf["payload_truncated"] = True
+        psd["capture"]["payload_truncated"] = True
+    psd["capture"].update({k: v for k, v in extra_psf.items() if v is not None})
+
+    psf = {"psd": psd}
 
     return {
         "timestamp": iso_nanos(epoch_nanos(start_time) +
@@ -395,6 +399,10 @@ def main():
                    help="GPIO of channel 0 (default 2)")
     p.add_argument("--gap-bytes", type=float, default=DEFAULT_GAP_BYTES, dest="gap_bytes",
                    help="idle byte-times that end a message (default %g)" % DEFAULT_GAP_BYTES)
+    p.add_argument("--uart-type", default=DEFAULT_UART_TYPE, dest="uart_type",
+                   help="psd.uart_type, e.g. TTL-3V3, RS-232, RS-485 (default %s)"
+                        % DEFAULT_UART_TYPE)
+    p.add_argument("--port", help="psd.port label for the probed line (default chN)")
     p.add_argument("--out", help="NDJSON output path (default: next to the capture)")
     p.add_argument("--index", default=INDEX, help="index name (default %s)" % INDEX)
     p.add_argument("--es-url", dest="es_url",

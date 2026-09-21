@@ -347,29 +347,34 @@ A document per message, matching the index mapping:
 ```json
 {
   "timestamp": "2026-09-21T11:25:25.278009000Z",
-  "event_type": "serial",
+  "event_type": "onboard",
   "protocol": "UART",
-  "duration": 1024000,
+  "duration": 1004500,
   "length_bytes": 12,
   "payload_hex": "68656c6c6f20657320310d0a",
   "psf": { "psd": {
-    "uart": { "baud": 115200, "channel": 0, "gpio": 2, "data_bits": 8,
-              "parity": "none", "stop_bits": 1, "byte_count": 12,
-              "text": "hello es 1\\r\\n" },
-    "capture": { "file": "burst-0001.sr", "start_sample": 20018,
-                 "end_sample": 22066, "samplerate_hz": 2000000,
-                 "burst": "burst-0001.sr", "gap_before_s": 1.986508 } } }
+    "uart_type": "TTL-3V3", "port": "ch0", "baud_rate": 115200,
+    "data_bits": 8, "parity": "none", "stop_bits": 1, "framing_error": false,
+    "capture": { "channel": 0, "gpio": 2, "byte_count": 12,
+                 "text": "hello es 1\\r\\n", "file": "burst-0001.sr",
+                 "start_sample": 20018, "end_sample": 22027,
+                 "samplerate_hz": 2000000, "burst": "burst-0001.sr",
+                 "gap_before_s": 1.986508 } } }
 }
 ```
 
-The shape follows the network documents already in `wiresploit-poc1`:
-uppercase `protocol`, and the protocol's own fields nested under `psf.psd`
-rather than flat. `psf.cb_id` is left out until its meaning is settled.
+The shape follows the documents already in `wiresploit-poc1`: `event_type`
+`onboard`, uppercase `protocol`, and a **flat** `psd` with `uart_type`, `port`,
+`baud_rate`, `data_bits`, `parity`, `stop_bits` and `framing_error`, exactly as
+that index's other UART source writes them. Everything specific to a
+logic-analyzer capture (which file, which burst, which samples, the decoded
+text) is nested under `psd.capture`, where it cannot clash. `--uart-type` and
+`--port` set the first two fields; they default to `TTL-3V3` and `chN`.
 
 - **Messages** are bytes grouped by idle gap: a new message starts when the
   line has been quiet for more than `--gap-bytes` byte-times (default 10, about
   0.9 ms at 115200). Framing and parity errors reported by sigrok are listed
-  in `psf.psd.uart.errors`.
+  in `psf.psd.capture.errors`, and `psd.framing_error` is set.
 - **`duration` is nanoseconds**, from the first bit to the last, and
   `timestamp` is `date_nanos`. Both are built from integers: a double has only
   ~240 ns of resolution at today's epoch values, which is coarser than one
