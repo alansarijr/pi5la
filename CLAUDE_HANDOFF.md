@@ -70,6 +70,10 @@ web UI. See `REPORT.md` for the findings,
    both columns must move together. Pin 8 is the 4th hole of the even row from the
    USB-C end; the 1st and 2nd holes of that row are 5 V and must never be used.
 2. **PulseView visual check** of `uart.sr` (M6).
+2b. **`sr2es.py` `_bulk` upload.** Decoding is verified on the Pi (3 bursts -> 3 exact
+   documents), but nothing has been posted to Elasticsearch yet. Kibana is at
+   100.95.111.97:5601; the ES port (usually 9200) has not been confirmed reachable.
+   Credentials go in `ES_USER`/`ES_PASSWORD` in the user's own shell -- never in chat.
 3. **ESP32:** I want to sniff its UART (115200 baud, powered from my PC). **It needs a
    74LVC245 buffer and a shared GND**, which I don't have wired yet.
 4. `ratesweep` `status=nosignal` rows: the code path has not been seen on hardware

@@ -380,6 +380,17 @@ A document per message, matching the index mapping:
   sr2es.py capture.sr --es-url https://es.example:9200
   ```
 
+**Verified on the Pi (2026-09-21).** A three-burst monitor session decoded to
+three documents, 36 bytes in total:
+
+```
+payload_hex 68656c6c6f20657320310d0a   psf.text "hello es 1
+"
+timestamps 2.008 s apart, psf.burst and gap_before_s carried through
+```
+
+The `_bulk` upload itself has not been exercised against a live cluster yet.
+
 Only UART is implemented so far; I²C and SPI would add their own `psf` fields.
 
 ---

@@ -39,7 +39,7 @@ open in PulseView, and can listen to a UART live.
 | Extra: live UART listening | ✅ verified on the Pi (2026-09-19): text decoded live, 0 stalls |
 | Extra: `--silence-timeout` | ✅ verified on the Pi (2026-09-19, then named `--idle-stop`): capture stops 1 s after the signal ends |
 | Extra: unbounded capture + `--monitor` | ✅ verified on the Pi (2026-09-21): memory flat, monitor recorded 1.09% of the time |
-| Extra: Elasticsearch export (`tools/sr2es.py`) | Built 2026-09-21, host-tested with a fake sigrok. **Not yet run on the Pi** |
+| Extra: Elasticsearch export (`tools/sr2es.py`) | ✅ decoding verified on the Pi (2026-09-21): 3 bursts → 3 documents, byte-exact. The `_bulk` upload itself is untested |
 
 ---
 
