@@ -346,23 +346,30 @@ A document per message, matching the index mapping:
 
 ```json
 {
-  "timestamp": "2026-09-21T10:25:06.500500000Z",
-  "event_type": "message",
-  "protocol": "uart",
-  "duration": 348000,
-  "length_bytes": 4,
-  "payload_hex": "6f6b0d0a",
-  "psf": { "baud": 115200, "channel": 0, "gpio": 2, "data_bits": 8,
-           "parity": "none", "stop_bits": 1, "byte_count": 4, "text": "ok\\r\\n",
-           "source_file": "burst-0002.sr", "start_sample": 1001000,
-           "end_sample": 1001696, "samplerate_hz": 2000000 }
+  "timestamp": "2026-09-21T11:25:25.278009000Z",
+  "event_type": "serial",
+  "protocol": "UART",
+  "duration": 1024000,
+  "length_bytes": 12,
+  "payload_hex": "68656c6c6f20657320310d0a",
+  "psf": { "psd": {
+    "uart": { "baud": 115200, "channel": 0, "gpio": 2, "data_bits": 8,
+              "parity": "none", "stop_bits": 1, "byte_count": 12,
+              "text": "hello es 1\\r\\n" },
+    "capture": { "file": "burst-0001.sr", "start_sample": 20018,
+                 "end_sample": 22066, "samplerate_hz": 2000000,
+                 "burst": "burst-0001.sr", "gap_before_s": 1.986508 } } }
 }
 ```
 
+The shape follows the network documents already in `wiresploit-poc1`:
+uppercase `protocol`, and the protocol's own fields nested under `psf.psd`
+rather than flat. `psf.cb_id` is left out until its meaning is settled.
+
 - **Messages** are bytes grouped by idle gap: a new message starts when the
   line has been quiet for more than `--gap-bytes` byte-times (default 10, about
-  0.9 ms at 115200). `event_type` is `error` when sigrok reports a framing or
-  parity error, and `psf.errors` lists them.
+  0.9 ms at 115200). Framing and parity errors reported by sigrok are listed
+  in `psf.psd.uart.errors`.
 - **`duration` is nanoseconds**, from the first bit to the last, and
   `timestamp` is `date_nanos`. Both are built from integers: a double has only
   ~240 ns of resolution at today's epoch values, which is coarser than one
