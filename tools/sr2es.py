@@ -11,13 +11,14 @@ Turn captures into Elasticsearch documents for the wiresploit-poc1 index.
 Document fields, matching the index mapping:
 
     timestamp     date_nanos, when the message's first bit was sampled
-    event_type    "message", or "error" for a framing/parity error
-    protocol      "uart"
+    event_type    "serial"
+    protocol      "UART"
     duration      nanoseconds from the first bit to the last
     length_bytes  bytes in the message
     payload_hex   the message's bytes, lowercase hex
-    psf           protocol-specific fields: baud, channel, errors, the ASCII
-                  rendering, and where in the capture it came from
+    psf           protocol-specific fields, shaped like the network documents
+                  already in the index: psf.psd.uart (baud, channel, framing,
+                  text, errors) and psf.psd.capture (file, burst, samples)
 
 Absolute time comes from the sidecar pi5la writes (<capture>.sr.meta.json) or,
 for a monitor session, from index.json.
@@ -42,7 +43,8 @@ import urllib.error
 import urllib.request
 
 INDEX = "wiresploit-poc1"
-PROTOCOL = "uart"
+PROTOCOL = "UART"            # uppercase, like the "TCP" documents in the index
+EVENT_TYPE = "serial"
 MAX_PAYLOAD_HEX = 64 * 1024      # 32 kB of bytes; longer messages are truncated
 MAX_TEXT = 2000                  # psf.text stays well under the 8191 ignore_above
 DEFAULT_GAP_BYTES = 10.0         # idle byte-times that end a message
@@ -273,7 +275,9 @@ def build_document(message, start_time, rate_hz, opts, extra_psf):
     if truncated:
         hex_payload = hex_payload[:MAX_PAYLOAD_HEX]
 
-    psf = {
+    # Same shape as the network documents already in the index: a few keys on
+    # psf, with the protocol's own fields nested under psf.psd.
+    uart = {
         "baud": opts.baud,
         "channel": opts.channel,
         "gpio": opts.base_gpio + opts.channel,
@@ -282,21 +286,26 @@ def build_document(message, start_time, rate_hz, opts, extra_psf):
         "stop_bits": 1,
         "byte_count": len(payload),
         "text": printable(payload),
-        "source_file": os.path.basename(opts.current_file),
+    }
+    if errors:
+        uart["errors"] = errors[:20]
+
+    capture = {
+        "file": os.path.basename(opts.current_file),
         "start_sample": first["start"],
         "end_sample": last["end"],
         "samplerate_hz": int(rate_hz),
     }
-    if errors:
-        psf["errors"] = errors[:20]
+    capture.update({k: v for k, v in extra_psf.items() if v is not None})
+
+    psf = {"psd": {"uart": uart, "capture": capture}}
     if truncated:
         psf["payload_truncated"] = True
-    psf.update({k: v for k, v in extra_psf.items() if v is not None})
 
     return {
         "timestamp": iso_nanos(epoch_nanos(start_time) +
                                int(round(first["start"] * 1e9 / rate_hz))),
-        "event_type": "error" if errors else "message",
+        "event_type": EVENT_TYPE,
         "protocol": PROTOCOL,
         "duration": int(round((last["end"] - first["start"]) / rate_hz * 1e9)),
         "length_bytes": len(payload),

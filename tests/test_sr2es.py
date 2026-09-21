@@ -83,42 +83,47 @@ class TestDocuments(unittest.TestCase):
                                    rate_hz=2e6, opts=Opts(), extra_psf={})
         self.assertEqual(sorted(doc), ["duration", "event_type", "length_bytes",
                                        "payload_hex", "protocol", "psf", "timestamp"])
-        self.assertEqual(doc["protocol"], "uart")
-        self.assertEqual(doc["event_type"], "message")
+        self.assertEqual(doc["protocol"], "UART")     # uppercase, like "TCP"
+        self.assertEqual(doc["event_type"], "serial")
         self.assertEqual(doc["payload_hex"], "6869")
         self.assertEqual(doc["length_bytes"], 2)
         # 2 bytes x 10 bits x 100 samples = 2000 samples = 1 ms = 1e6 ns
         self.assertEqual(doc["duration"], 1000000)
         self.assertEqual(doc["timestamp"], "2001-09-09T01:46:40.000500000Z")
 
-    def test_psf_carries_protocol_details(self):
+    def test_psf_matches_the_existing_document_shape(self):
+        """The network documents in this index nest their details under psf.psd."""
         doc = sr2es.build_document(self.message(b"ok\r\n"), 1e9, 2e6, Opts(),
                                    {"burst": "burst-0001.sr", "gap_before_s": 2.95})
-        psf = doc["psf"]
-        self.assertEqual(psf["baud"], 115200)
-        self.assertEqual(psf["channel"], 0)
-        self.assertEqual(psf["gpio"], 2)
-        self.assertEqual(psf["byte_count"], 4)
-        self.assertEqual(psf["text"], "ok\\r\\n")
-        self.assertEqual(psf["source_file"], "cap.sr")
-        self.assertEqual(psf["burst"], "burst-0001.sr")
-        self.assertEqual(psf["gap_before_s"], 2.95)
-        self.assertNotIn("errors", psf)
+        uart = doc["psf"]["psd"]["uart"]
+        self.assertEqual(uart["baud"], 115200)
+        self.assertEqual(uart["channel"], 0)
+        self.assertEqual(uart["gpio"], 2)
+        self.assertEqual(uart["byte_count"], 4)
+        self.assertEqual(uart["text"], "ok\\r\\n")
+        self.assertEqual(uart["data_bits"], 8)
+        self.assertNotIn("errors", uart)
 
-    def test_errors_change_the_event_type(self):
+        capture = doc["psf"]["psd"]["capture"]
+        self.assertEqual(capture["file"], "cap.sr")
+        self.assertEqual(capture["burst"], "burst-0001.sr")
+        self.assertEqual(capture["gap_before_s"], 2.95)
+        self.assertEqual(capture["samplerate_hz"], 2000000)
+
+    def test_errors_are_listed_in_psd(self):
         message = self.message(b"x")
         message.append({"start": 3000, "end": 4000, "byte": None, "error": True,
                         "text": "frame error"})
         doc = sr2es.build_document(message, 1e9, 2e6, Opts(), {})
-        self.assertEqual(doc["event_type"], "error")
-        self.assertEqual(doc["psf"]["errors"], ["frame error"])
+        self.assertEqual(doc["event_type"], "serial")
+        self.assertEqual(doc["psf"]["psd"]["uart"]["errors"], ["frame error"])
         self.assertEqual(doc["length_bytes"], 1)
 
     def test_long_payloads_are_truncated(self):
         doc = sr2es.build_document(self.message(b"A" * 40000), 1e9, 2e6, Opts(), {})
         self.assertEqual(len(doc["payload_hex"]), sr2es.MAX_PAYLOAD_HEX)
         self.assertTrue(doc["psf"]["payload_truncated"])
-        self.assertLessEqual(len(doc["psf"]["text"]), sr2es.MAX_TEXT)
+        self.assertLessEqual(len(doc["psf"]["psd"]["uart"]["text"]), sr2es.MAX_TEXT)
         self.assertEqual(doc["length_bytes"], 40000)     # the true length is kept
 
     def test_iso_nanos(self):
