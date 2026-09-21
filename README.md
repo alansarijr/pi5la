@@ -354,7 +354,7 @@ Run it:
     --pi5la ~/build-pi5la/pi5la --captures ~/captures
 ```
 
-Then open `http://<pi-address>:8080`. Options: `--host`, `--port`,
+Then open `http://<pi-address>:9090`. Options: `--host`, `--port`,
 `--sigrok`, `--captures` (default `~/captures`).
 
 What the page does:

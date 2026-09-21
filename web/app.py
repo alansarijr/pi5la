@@ -404,7 +404,7 @@ def main():
     p.add_argument("--captures", default=os.path.join(home, "captures"),
                    help="directory for .sr files")
     p.add_argument("--host", default="0.0.0.0", help="bind address (127.0.0.1 for local only)")
-    p.add_argument("--port", type=int, default=8080)
+    p.add_argument("--port", type=int, default=9090, help="listen port (default 9090)")
     opts = p.parse_args()
 
     os.makedirs(opts.captures, exist_ok=True)
