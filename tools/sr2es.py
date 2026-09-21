@@ -125,12 +125,42 @@ def samplerate_of(path, sigrok="sigrok-cli"):
 # decoding
 
 
+_ANNOTATION_CACHE = {}
+# Error-ish classes worth keeping, if this sigrok build has them. Names differ
+# between versions, so they are matched against what the decoder reports.
+ERROR_CLASSES = ("rx-packet-error", "rx-parity-err", "rx-break", "error", "warning")
+
+
+def uart_classes(sigrok="sigrok-cli"):
+    """
+    Annotation classes this sigrok's UART decoder actually has.
+
+    Class names vary between versions (0.7's uart has no rx-packet-error, for
+    example), and naming a missing one makes sigrok-cli fail outright, so ask
+    it rather than assume.
+    """
+    if sigrok in _ANNOTATION_CACHE:
+        return _ANNOTATION_CACHE[sigrok]
+    try:
+        out = subprocess.run([sigrok, "--protocol-decoder", "uart", "--show"],
+                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+                             timeout=60).stdout.decode("utf-8", "replace")
+    except (OSError, subprocess.SubprocessError) as e:
+        raise Error("cannot run %s: %s" % (sigrok, e))
+    available = set(re.findall(r"^\s*-?\s*([a-z0-9][a-z0-9-]*):", out, re.M))
+    wanted = ["rx-data"] + [c for c in ERROR_CLASSES if c in available]
+    if "rx-data" not in available:
+        wanted = ["rx-data"]          # trust the default name and let sigrok complain
+    _ANNOTATION_CACHE[sigrok] = wanted
+    return wanted
+
+
 def decode_uart(path, channel, baud, base_gpio=2, sigrok="sigrok-cli"):
     """Run sigrok-cli and return its annotation lines."""
     argv = [
         sigrok, "-i", path,
         "-P", "uart:rx=GPIO%d:baudrate=%d:format=hex" % (base_gpio + channel, baud),
-        "-A", "uart=rx-data:rx-packet-error",
+        "-A", "uart=" + ":".join(uart_classes(sigrok)),
         "--protocol-decoder-samplenum",
     ]
     try:

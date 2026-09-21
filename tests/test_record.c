@@ -16,8 +16,11 @@
 #define PERIOD_WORDS 1024                       /* 4096 samples at 8 channels */
 #define PERIOD_SAMPLES (PERIOD_WORDS * 4)
 
+#define BIG_WORDS 65536                         /* 4 x the scan chunk */
+
 static const char *g_pattern;                   /* '.' = idle period, 'x' = busy */
 static uint32_t g_words[PERIOD_WORDS];
+static uint32_t *g_big;                         /* one oversized period, or NULL */
 
 /* Stub: feeds one period per character of g_pattern. */
 int capture_stream(PIO pio, const capture_config_t *cfg, capture_sink_t sink, void *ctx,
@@ -29,6 +32,13 @@ int capture_stream(PIO pio, const capture_config_t *cfg, capture_sink_t sink, vo
     (void)cfg;
     memset(res, 0, sizeof(*res));
     res->rate_hz = clkdiv_hz(cfg->div);
+
+    if (g_big) {
+        res->bytes = BIG_WORDS * 4;
+        sink(g_big, BIG_WORDS, ctx);
+        res->total_s = 1.0;
+        return 0;
+    }
 
     for (p = g_pattern; *p; p++) {
         size_t i;
@@ -156,6 +166,35 @@ int main(void)
     /* The payload files are cleaned up, leaving only .sr files. */
     snprintf(path, sizeof(path), "%s/burst-0001.sr.logic", dir);
     CHECK(stat(path, &fst) != 0);
+    rm_dir(dir);
+
+    /*
+     * One DMA period is much larger than the gap, so activity has to be
+     * scanned in chunks: two bursts inside a single period must still come out
+     * as two files, not one.
+     */
+    memcpy(dir, dir_template, sizeof(dir));
+    CHECK(mkdtemp(dir) != NULL);
+    opts.monitor_dir = dir;
+    g_big = calloc(BIG_WORDS, sizeof(*g_big));
+    CHECK(g_big != NULL);
+    if (g_big) {
+        size_t i;
+
+        for (i = 0; i < BIG_WORDS; i++)
+            g_big[i] = 0x7f7f7f7f;
+        g_big[1000] = 0x7e7e7e7f;           /* first burst, sample ~4000 */
+        g_big[1001] = 0x7e7e7e7e;
+        g_big[40000] = 0x7f7f7f7e;          /* second, ~144 000 samples later */
+        g_big[40001] = 0x7f7f7f7f;
+
+        g_pattern = NULL;
+        CHECK(record_run((PIO)0, &cfg, &opts, &st, &sres) == 0);
+        CHECK(st.bursts == 2);
+        CHECK(count_files(dir, "burst") == 2);
+        free(g_big);
+        g_big = NULL;
+    }
     rm_dir(dir);
 
     /* --- monitor: a quiet line writes nothing at all --------------------- */

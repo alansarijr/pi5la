@@ -18,6 +18,13 @@
 #define MAX_BURSTS 100000
 #define PATH_LEN 1024
 
+/*
+ * Activity is scanned in pieces of this many words, independently of the DMA
+ * period: 16384 words is 64 KiB, so 65536 samples at 8 channels, about 33 ms
+ * at 2 MSa/s and 1.3 ms at 50 MSa/s.
+ */
+#define RECORD_SCAN_CHUNK_WORDS 16384
+
 typedef struct {
     unsigned index;
     uint64_t start_sample;
@@ -268,9 +275,8 @@ static int burst_close(rec_t *r, uint64_t keep_until)
 
 /* ---------- the sink ---------- */
 
-static int sink(const uint32_t *words, size_t n_words, void *arg)
+static int process_chunk(rec_t *r, const uint32_t *words, size_t n_words)
 {
-    rec_t *r = arg;
     const record_opts_t *o = r->opts;
     uint64_t n = (uint64_t)n_words * r->spw;
     uint64_t base = r->stats->samples;
@@ -347,6 +353,32 @@ failed:
     r->failed = true;
     r->stats->write_failed = true;
     return -1;
+}
+
+/*
+ * A DMA period is deliberately large (4 MiB, so an SD card stall can't
+ * overflow the ring), but that is 2.1 s of samples at 2 MSa/s on 8 channels.
+ * Checking for activity once per period would make every burst at least that
+ * long, so each period is scanned in RECORD_SCAN_CHUNK-sized pieces: burst
+ * edges and silence timeouts then depend on the chunk, not the ring.
+ */
+static int sink(const uint32_t *words, size_t n_words, void *arg)
+{
+    rec_t *r = arg;
+    size_t done = 0;
+
+    while (done < n_words) {
+        size_t chunk = n_words - done;
+        int ret;
+
+        if (chunk > RECORD_SCAN_CHUNK_WORDS)
+            chunk = RECORD_SCAN_CHUNK_WORDS;
+        ret = process_chunk(r, words + done, chunk);
+        if (ret)
+            return ret;
+        done += chunk;
+    }
+    return 0;
 }
 
 /* ---------- entry point ---------- */
