@@ -69,6 +69,7 @@ All measurements are from 2026-09-16 unless dated otherwise. Items marked
 | Silence timeout (2026-09-21) | Ended itself 1 s after the line went quiet (4.194 s total), decoded byte-exact; the wait wrote nothing: 8.4 M samples captured, 2.4 M written |
 | Monitor mode (2026-09-21) | 15 s with three UART bursts 3 s apart: 3 files of 0.061 s each, `gap_before_s` ~2.95 s, **1.09% of the time recorded** (20 kB on disk vs ~33 MB continuous), each burst decoded correctly |
 | Elasticsearch export (2026-09-21) | A 3-burst monitor session decoded to 3 documents, 36 bytes: `payload_hex` `68656c6c6f20657320310d0a` = `hello es 1\r\n`, timestamps 2.008 s apart, `psf.burst` and `gap_before_s` carried through |
+| _bulk upload (2026-09-21) | 3 documents accepted by the live cluster (http://100.95.111.97:9200, basic auth from the environment). The index already held 437 network documents and one UART document, so the shape was matched to theirs |
 | Live listening (2026-09-19) | `uart-listen.sh` decoded UART text as it arrived: 15.7 M samples streamed at 2 MSa/s, 0 stalls |
 
 ### 3.3 Rate ceiling
