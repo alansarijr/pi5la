@@ -88,7 +88,10 @@ if(NOT PI5LA_TESTS_ONLY)
     add_executable(fdebugtest tools/fdebugtest.c)
     target_link_libraries(fdebugtest PRIVATE pi5la_hw)
 
-    # Live UART listener script, placed next to pi5la in the build directory.
+    # Helper scripts, placed next to pi5la in the build directory.
+    file(COPY tools/sr2es.py DESTINATION ${CMAKE_CURRENT_BINARY_DIR}
+        FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
+                         WORLD_READ WORLD_EXECUTE)
     file(COPY tools/uart-listen.sh DESTINATION ${CMAKE_CURRENT_BINARY_DIR}
         FILE_PERMISSIONS OWNER_READ OWNER_WRITE OWNER_EXECUTE GROUP_READ GROUP_EXECUTE
                          WORLD_READ WORLD_EXECUTE)
@@ -102,6 +105,7 @@ if(NOT PI5LA_TESTS_ONLY)
 
     install(TARGETS pi5la ratesweep bitprobe fdebugtest RUNTIME DESTINATION bin)
     install(PROGRAMS tools/uart-listen.sh DESTINATION bin RENAME uart-listen)
+    install(PROGRAMS tools/sr2es.py DESTINATION bin RENAME sr2es)
 endif()
 
 enable_testing()
@@ -112,9 +116,12 @@ foreach(t test_unpack test_srzip test_srwriter test_analyze test_progbuild test_
     add_test(NAME ${t} COMMAND ${t})
 endforeach()
 
-# Web UI argument validation (web/args.py). Skipped when python3 is missing.
+# Python-side tests: web UI argument validation and the Elasticsearch exporter.
+# Skipped when python3 is missing.
 find_program(PI5LA_PYTHON3 python3)
 if(PI5LA_PYTHON3)
-    add_test(NAME test_web_args
-        COMMAND ${PI5LA_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_web_args.py)
+    foreach(pt test_web_args test_sr2es)
+        add_test(NAME ${pt}
+            COMMAND ${PI5LA_PYTHON3} ${CMAKE_CURRENT_SOURCE_DIR}/tests/${pt}.py)
+    endforeach()
 endif()

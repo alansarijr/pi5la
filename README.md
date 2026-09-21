@@ -329,6 +329,61 @@ pi5la --rate 4M --stream | sigrok-cli -I binary:numchannels=8:samplerate=4000000
 
 ---
 
+## Sending captures to Elasticsearch
+
+`tools/sr2es.py` closes the pipeline: capture → decode → one document per
+decoded message → NDJSON → `_bulk` into the `wiresploit-poc1` index.
+
+```bash
+sr2es.py capture.sr --baud 115200                      # writes capture.sr.ndjson
+sr2es.py ~/captures/mon-test --channel 0               # a whole monitor session
+sr2es.py capture.sr --es-url https://es.example:9200   # and upload it
+```
+
+A document per message, matching the index mapping:
+
+```json
+{
+  "timestamp": "2026-09-21T10:25:06.500500000Z",
+  "event_type": "message",
+  "protocol": "uart",
+  "duration": 348000,
+  "length_bytes": 4,
+  "payload_hex": "6f6b0d0a",
+  "psf": { "baud": 115200, "channel": 0, "gpio": 2, "data_bits": 8,
+           "parity": "none", "stop_bits": 1, "byte_count": 4, "text": "ok\\r\\n",
+           "source_file": "burst-0002.sr", "start_sample": 1001000,
+           "end_sample": 1001696, "samplerate_hz": 2000000 }
+}
+```
+
+- **Messages** are bytes grouped by idle gap: a new message starts when the
+  line has been quiet for more than `--gap-bytes` byte-times (default 10, about
+  0.9 ms at 115200). `event_type` is `error` when sigrok reports a framing or
+  parity error, and `psf.errors` lists them.
+- **`duration` is nanoseconds**, from the first bit to the last, and
+  `timestamp` is `date_nanos`. Both are built from integers: a double has only
+  ~240 ns of resolution at today's epoch values, which is coarser than one
+  sample at 50 MSa/s.
+- **Absolute time** comes from `<capture>.sr.meta.json`, which pi5la writes
+  beside every capture, or from `index.json` for a monitor session. Without a
+  sidecar the tool falls back to the file's mtime and says so.
+- **Decoding reuses `sigrok-cli`** (`-A uart=rx-data --protocol-decoder-samplenum`),
+  the same decoder that produced byte-exact results in M6.
+- **The NDJSON is always written first**, so a failed upload loses nothing:
+  re-send it later with `curl --data-binary @file <url>/_bulk`.
+- **Credentials never go on the command line.** Set `ES_API_KEY`, or `ES_USER`
+  and `ES_PASSWORD`, in the environment:
+
+  ```bash
+  read -s ES_API_KEY; export ES_API_KEY      # not saved in shell history
+  sr2es.py capture.sr --es-url https://es.example:9200
+  ```
+
+Only UART is implemented so far; I²C and SPI would add their own `psf` fields.
+
+---
+
 ## Web UI
 
 `web/app.py` is a small Flask app that runs on the Pi and drives the same

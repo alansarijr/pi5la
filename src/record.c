@@ -192,6 +192,36 @@ static int write_index(rec_t *r)
     return 0;
 }
 
+/*
+ * A .sr file has no room for wall-clock time, but documents sent downstream
+ * need it, so a continuous capture gets "<out>.meta.json" beside it. Monitor
+ * mode records the same thing per burst in index.json.
+ */
+static int write_meta(rec_t *r, uint64_t start_sample, uint64_t samples)
+{
+    char path[PATH_LEN];
+    FILE *f;
+
+    snprintf(path, sizeof(path), "%s.meta.json", r->opts->out_path);
+    f = fopen(path, "w");
+    if (!f) {
+        fprintf(stderr, "record: cannot write %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    fprintf(f, "{\n  \"samplerate_hz\": %.0f,\n  \"channels\": %u,\n  \"base_gpio\": %u,\n",
+            r->rate_hz, r->cfg->channels, r->cfg->base_gpio);
+    fprintf(f, "  \"capture_started\": %.6f,\n  \"start_sample\": %" PRIu64 ",\n",
+            r->t0, start_sample);
+    fprintf(f, "  \"start_time\": %.6f,\n  \"samples\": %" PRIu64 ",\n",
+            r->t0 + start_sample / r->rate_hz, samples);
+    fprintf(f, "  \"duration_s\": %.6f\n}\n", samples / r->rate_hz);
+    if (fclose(f)) {
+        fprintf(stderr, "record: writing %s: %s\n", path, strerror(errno));
+        return -1;
+    }
+    return 0;
+}
+
 static int burst_open(rec_t *r, uint64_t start_sample)
 {
     char path[PATH_LEN];
@@ -391,7 +421,9 @@ int record_run(PIO pio, const capture_config_t *cfg, const record_opts_t *opts,
             else if (write_index(&r))
                 ret = -1;
         } else if (r.file_open) {
-            if (file_close(&r, UINT64_MAX))
+            uint64_t start_sample = r.file_start, samples = r.w.samples;
+
+            if (file_close(&r, UINT64_MAX) || write_meta(&r, start_sample, samples))
                 ret = -1;
         } else if (!r.waiting) {
             ret = -1;   /* should not happen: no file and not waiting */

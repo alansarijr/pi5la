@@ -39,6 +39,7 @@ open in PulseView, and can listen to a UART live.
 | Extra: live UART listening | ✅ verified on the Pi (2026-09-19): text decoded live, 0 stalls |
 | Extra: `--silence-timeout` | ✅ verified on the Pi (2026-09-19, then named `--idle-stop`): capture stops 1 s after the signal ends |
 | Extra: unbounded capture + `--monitor` | ✅ verified on the Pi (2026-09-21): memory flat, monitor recorded 1.09% of the time |
+| Extra: Elasticsearch export (`tools/sr2es.py`) | Built 2026-09-21, host-tested with a fake sigrok. **Not yet run on the Pi** |
 
 ---
 
@@ -169,6 +170,18 @@ pulseview capture.sr
 | `--stream` | Capture until Ctrl-C and write samples to stdout |
 
 **Exit codes:** `0` OK, `1` error, `2` dropped samples detected.
+
+### Send a capture to Elasticsearch
+
+```bash
+sr2es.py capture.sr --baud 115200                     # writes capture.sr.ndjson
+sr2es.py ~/captures/mon-test --es-url https://es:9200 # and uploads it
+```
+
+One document per decoded message into `wiresploit-poc1`: `timestamp`
+(date_nanos), `event_type`, `protocol`, `duration` (ns), `length_bytes`,
+`payload_hex`, and `psf` with the UART details. Credentials come from
+`ES_API_KEY`, or `ES_USER` / `ES_PASSWORD`.
 
 ### Decode a capture on the command line
 

@@ -104,6 +104,12 @@ web UI. See `REPORT.md` for the findings,
 - **`--monitor DIR`** records only bursts (`src/burst.c` state machine, `src/record.c`
   I/O): burst-NNNN.sr plus index.json with start_time/duration/gap_before_s. Idle is never
   written. Trailing idle is removed with `ftruncate()`. Detection lags by up to one period.
+- **Elasticsearch export:** `tools/sr2es.py` (stdlib only) decodes a capture with
+  sigrok-cli, groups bytes into messages by idle gap, and writes bulk NDJSON for the
+  `wiresploit-poc1` index, uploading when `--es-url` is given. Timestamps are built in
+  integer nanoseconds (a double is ~240 ns coarse at epoch scale). Wall-clock time comes
+  from `<out>.sr.meta.json`, written by record.c, or a monitor `index.json`.
+  Credentials only via `ES_API_KEY` / `ES_USER` + `ES_PASSWORD`.
 - **Exit codes:** `0` OK, `1` error, `2` dropped samples (RXSTALL or ring overflow). The
   wall-clock loss estimate is informational only.
 - M8 (RLE, pre-trigger) was skipped by agreement.
