@@ -232,6 +232,11 @@ pi5la --rate 2M --out capture.sr --silence-timeout 1s
 It waits for the first change (the wait writes nothing but the `--pre`
 lead-in), records, and stops after the line has been silent that long.
 
+**Verified on the Pi (2026-09-21)**, UART jumper pin 8 -> pin 3, with the text
+sent 3 s in: the capture ended itself at 4.194 s, exit 0, and sigrok decoded
+`hello silence`. Of 8 388 608 samples captured, only 2 415 412 were written:
+the waiting cost no disk.
+
 *(This option was called `--idle-stop` until 2026-09-21. The old name still
 works and prints a note.)*
 
@@ -261,6 +266,19 @@ pi5la --rate 2M --monitor ~/captures/mon1 --gap 100ms --pre 10ms --post 50ms
   `index.json` as `gap_before_s` rather than as gigabytes of unchanging bytes.
 - A protocol that pauses for longer than `--gap` splits into two files, so
   raise `--gap` if one transaction is being cut in half.
+
+**Verified on the Pi (2026-09-21).** Three UART lines were sent 3 s apart
+during a 15 s monitor run at 2 MSa/s on 8 channels:
+
+```
+burst 1: 121552 samples (0.061 s)     gap_before_s 2.99
+burst 2: 121548 samples (0.061 s)     gap_before_s 2.95
+burst 3: 121548 samples (0.061 s)     gap_before_s 2.95
+monitor: 3 burst(s), 1.09% of the time recorded
+```
+
+The directory came to **20 kB**, against about 33 MB for the same 15 s
+recorded continuously, and `burst-0002.sr` decoded to `burst 2`.
 
 Decode one burst exactly like any other capture:
 

@@ -42,7 +42,8 @@ Paste this into a new Claude chat, or attach it, to continue the project.
 
 ## Current state
 
-The latest commit adds `--duration` / `--idle-stop`. See `REPORT.md` for the findings,
+The latest commits add unbounded capture, `--silence-timeout` and `--monitor`, plus the
+web UI. See `REPORT.md` for the findings,
 `PROJECT_SUMMARY.md` for the overview, and `README.md` for every measurement.
 
 **Verified on the Pi:**
@@ -56,13 +57,10 @@ The latest commit adds `--duration` / `--idle-stop`. See `REPORT.md` for the fin
 - **M6:** UART loopback decoded byte-exact with sigrok-cli.
 - **M0:** stock `piopwm` example (2026-09-17).
 - **Live `--stream` / `uart-listen.sh`, `--duration`, `--idle-stop`** (2026-09-19).
+- **Unbounded capture, `--silence-timeout`, `--monitor`** (2026-09-21): 30 s at 2 MSa/s
+  with RSS flat at 6 MB; monitor recorded 3 bursts, 1.09% of the elapsed time.
 
 **Not yet verified:**
-0. **Unbounded capture, `--silence-timeout` rename and `--monitor`** (2026-09-21). They
-   build clean and pass 10 host tests (including `test_record`, which stubs
-   `capture_stream` and checks burst files, index.json and the caps), but have **never run
-   on the Pi**. Copy the repo and rebuild first. Watch RSS during a long run: it must stay
-   flat now that samples stream to disk.
 1. ~~`pi5la --stream` / `uart-listen.sh`~~ Done 2026-09-19: decoded `hello live` as it
    arrived (15.7 M samples at 2 MSa/s, 0 stalls). `--duration` / `--idle-stop` verified on
    the same wiring.

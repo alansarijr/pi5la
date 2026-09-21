@@ -66,6 +66,8 @@ All measurements are from 2026-09-16 unless dated otherwise. Items marked
 | UART (M6) | 115200 8N1 loopback, 8000 bytes, `cmp` → MATCH |
 | Auto-stop (2026-09-19) | `--duration 60s --silence-timeout 1s` (then named `--idle-stop`) ended a capture on its own 1 s after the signal stopped, with the generator and again with a real 115200 UART line (decoded byte-exact, 0 stalls, exit 0) |
 | Streaming to disk (2026-09-21) | 30 s at 2 MSa/s x 8 ch: RSS flat at 6016 kB (it would have been ~120 MB in RAM before), 0 stalls, exit 0 |
+| Silence timeout (2026-09-21) | Ended itself 1 s after the line went quiet (4.194 s total), decoded byte-exact; the wait wrote nothing: 8.4 M samples captured, 2.4 M written |
+| Monitor mode (2026-09-21) | 15 s with three UART bursts 3 s apart: 3 files of 0.061 s each, `gap_before_s` ~2.95 s, **1.09% of the time recorded** (20 kB on disk vs ~33 MB continuous), each burst decoded correctly |
 | Live listening (2026-09-19) | `uart-listen.sh` decoded UART text as it arrived: 15.7 M samples streamed at 2 MSa/s, 0 stalls |
 
 ### 3.3 Rate ceiling

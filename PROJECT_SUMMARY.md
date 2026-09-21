@@ -38,7 +38,7 @@ open in PulseView, and can listen to a UART live.
 | M8 RLE / pre-trigger | Not started (skipped by agreement) |
 | Extra: live UART listening | ✅ verified on the Pi (2026-09-19): text decoded live, 0 stalls |
 | Extra: `--silence-timeout` | ✅ verified on the Pi (2026-09-19, then named `--idle-stop`): capture stops 1 s after the signal ends |
-| Extra: unbounded capture + `--monitor` | Built 2026-09-21, host-tested. **Not yet run on the Pi** |
+| Extra: unbounded capture + `--monitor` | ✅ verified on the Pi (2026-09-21): memory flat, monitor recorded 1.09% of the time |
 
 ---
 
@@ -254,7 +254,7 @@ tests/              host unit tests (ctest)
 
 - [x] Run the live `uart-listen.sh` on the Pi (2026-09-19): decoded `hello live` as it arrived.
 - [x] `--duration` and `--silence-timeout` (2026-09-19): capture ends itself when the line goes quiet.
-- [ ] Unbounded capture (streaming to disk) and `--monitor` burst recording: run them on the Pi.
+- [x] Unbounded capture and `--monitor` (2026-09-21): 30 s with flat memory; 3 bursts captured, idle skipped.
 - [ ] Confirm the PulseView visual decode of `uart.sr` (M6).
 - [x] Confirm the stock `piopwm` example runs cleanly (M0, 2026-09-17, on GPIO 20).
 - [ ] ESP32 UART test **through a 74LVC245 buffer** with a shared GND.
