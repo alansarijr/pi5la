@@ -5,11 +5,13 @@ Pi 5's RP1 southbridge. It writes sigrok `.sr` files that open in PulseView.
 
 Target: 10 MSa/s on 8 channels, sustained, with **zero dropped samples**.
 
-> **Status:** M0–M7 are verified on Pi 5 hardware (2026-09-16/17). The spec
-> target is met, and the reliable ceiling is 50 MB/s of packed data: 8 ch at
-> 50 MSa/s, 4 ch at 100 MSa/s, 1–2 ch at 200 MSa/s. Still unverified on the Pi:
-> live `--stream` / `uart-listen` and the PulseView visual check. M8 is not
-> implemented. Findings are collected in `REPORT.md`.
+> **Status:** M0–M7 are verified on Pi 5 hardware, along with live listening,
+> unbounded capture, `--silence-timeout`, `--monitor` and the Elasticsearch
+> decode (2026-09-16 … 09-21). The spec target is met, and the reliable ceiling
+> is 50 MB/s of packed data: 8 ch at 50 MSa/s, 4 ch at 100 MSa/s, 1–2 ch at
+> 200 MSa/s. Still unverified: the `_bulk` upload against a live cluster, the
+> PulseView visual check, and any external target through the 74LVC245 buffer.
+> M8 is not implemented. Findings are collected in `REPORT.md`.
 
 ---
 
