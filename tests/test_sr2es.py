@@ -21,7 +21,7 @@ class Opts:
 
 
 class TestParsing(unittest.TestCase):
-    def test_annotation_lines(self):
+    def test_annotation_lines_with_class(self):
         lines = [
             "sigrok-cli 0.7.2",                       # header, ignored
             "100-1000 uart-1: rx-data: 68",
@@ -34,6 +34,21 @@ class TestParsing(unittest.TestCase):
         self.assertEqual(events[0], {"start": 100, "end": 1000, "byte": 0x68,
                                      "error": False, "text": "68"})
         self.assertTrue(events[2]["error"])
+
+    def test_annotation_lines_without_class(self):
+        """sigrok 0.7 on the Pi prints no class name: '20018-20157 uart-1: 68'."""
+        lines = [
+            "20018-20157 uart-1: 68",
+            "20191-20330 uart-1: 6C",                 # uppercase hex
+            "20365-20504 uart-1: frame error",
+        ]
+        events = sr2es.parse_annotations(lines)
+        self.assertEqual(len(events), 3)
+        self.assertEqual(events[0]["byte"], 0x68)
+        self.assertEqual(events[0]["start"], 20018)
+        self.assertEqual(events[1]["byte"], 0x6C)
+        self.assertTrue(events[2]["error"])
+        self.assertIsNone(events[2]["byte"])
 
     def test_out_of_order_lines_are_sorted(self):
         events = sr2es.parse_annotations(["500-600 uart-1: rx-data: 02",

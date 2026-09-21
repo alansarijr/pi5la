@@ -47,10 +47,15 @@ MAX_PAYLOAD_HEX = 64 * 1024      # 32 kB of bytes; longer messages are truncated
 MAX_TEXT = 2000                  # psf.text stays well under the 8191 ignore_above
 DEFAULT_GAP_BYTES = 10.0         # idle byte-times that end a message
 
-# "1234-5678 uart-1: rx-data: 6a"  (sigrok-cli --protocol-decoder-samplenum)
+# sigrok-cli --protocol-decoder-samplenum prints either
+#   "1234-5678 uart-1: 6a"            (0.7: no class name)
+#   "1234-5678 uart-1: rx-data: 6a"   (with the class)
+# so the class is optional.
 ANNOTATION_RE = re.compile(
-    r"^(?P<start>\d+)-(?P<end>\d+)\s+(?P<decoder>\S+):\s+(?P<cls>[\w-]+):\s*(?P<text>.*)$")
-HEX_RE = re.compile(r"[0-9A-Fa-f]{2}")
+    r"^(?P<start>\d+)-(?P<end>\d+)\s+(?P<decoder>[\w-]+):\s+"
+    r"(?:(?P<cls>[a-z][\w-]*):\s+)?(?P<text>.*)$")
+HEX_RE = re.compile(r"\b[0-9A-Fa-f]{2}\b")
+ERROR_TEXT_RE = re.compile(r"error|break|parity|framing", re.I)
 
 
 class Error(Exception):
@@ -142,8 +147,8 @@ def uart_classes(sigrok="sigrok-cli"):
     if sigrok in _ANNOTATION_CACHE:
         return _ANNOTATION_CACHE[sigrok]
     try:
-        out = subprocess.run([sigrok, "--protocol-decoder", "uart", "--show"],
-                             stdout=subprocess.PIPE, stderr=subprocess.STDOUT,
+        out = subprocess.run([sigrok, "-P", "uart", "--show"], stdout=subprocess.PIPE,
+                             stderr=subprocess.STDOUT,
                              timeout=60).stdout.decode("utf-8", "replace")
     except (OSError, subprocess.SubprocessError) as e:
         raise Error("cannot run %s: %s" % (sigrok, e))
@@ -186,8 +191,11 @@ def parse_annotations(lines):
         if not m:
             continue
         text = m.group("text").strip()
+        cls = m.group("cls") or ""
         hexes = HEX_RE.findall(text)
-        is_error = "error" in m.group("cls")
+        # Without a class name, an error shows only in the text ("frame error").
+        is_error = bool(ERROR_TEXT_RE.search(cls)) or (not hexes and
+                                                       bool(ERROR_TEXT_RE.search(text)))
         if not hexes and not is_error:
             continue
         events.append({
