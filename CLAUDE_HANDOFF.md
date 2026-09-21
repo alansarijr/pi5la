@@ -119,6 +119,9 @@ The latest commit adds `--duration` / `--idle-stop`. See `REPORT.md` for the fin
   - GND = pins 6, 9, 39, and others.
 - **Idle levels:** GPIO 2–8 high (pull-ups), GPIO 9 low. An undriven GPIO 20 on a jumper
   idles high.
+- **SD card writes 14.4 MB/s** but stalls in bursts: file capture defaults to a
+  4 x 4 MiB DMA ring (`CAPTURE_DMA_BUF_RECORD`), since 4 x 1 MiB overflowed after 7 s at
+  only 2 MB/s. `--stream` and the tools keep 4 x 1 MiB.
 - **CMA pool is 64 MB** (`CmaTotal 65536 kB`): the largest DMA ring is 4 × 8 MiB.
   66.7 MB/s packed is unreliable at every `--dma-buf` (≤3/5 clean); 100 MB/s fails outright.
   50 MB/s is reliable: 8ch@50M, 4ch@100M, 2ch@200M each 5/5 clean (2026-09-17).

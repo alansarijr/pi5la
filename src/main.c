@@ -67,14 +67,16 @@ static void usage(FILE *f)
         "  --stream           capture until Ctrl-C, writing samples to stdout as they\n"
         "                     arrive (1 byte per sample, channel N in bit N); for\n"
         "                     sigrok-cli -I binary:numchannels=N:samplerate=RATE -i -\n"
-        "  --dma-buf BYTES    cyclic DMA period size, ring of %d periods (default %u)\n"
+        "  --dma-buf BYTES    cyclic DMA period size, ring of %d periods (default %u when\n"
+        "                     writing to disk, %u for --stream)\n"
         "\n"
         "Silence, gap and size are checked once per DMA period, so a stop can lag by one\n"
         "period (1 MiB = 1 M samples at 8 channels).\n"
         "\n"
         "Exit status: 0 ok, 1 error, %d dropped samples detected.\n",
         DEFAULT_GAP, DEFAULT_PRE, DEFAULT_POST, DEFAULT_MAX_SIZE, GENERATOR_DEFAULT_GPIO,
-        CAPTURE_DMA_BUF_COUNT, CAPTURE_DMA_BUF_DEFAULT, EXIT_DROPPED);
+        CAPTURE_DMA_BUF_COUNT, CAPTURE_DMA_BUF_RECORD, CAPTURE_DMA_BUF_DEFAULT,
+        EXIT_DROPPED);
 }
 
 static int write_raw(const char *path, const uint32_t *words, size_t n_words)
@@ -271,7 +273,7 @@ int main(int argc, char **argv)
     const char *out_path = NULL, *raw_path = NULL;
     double rate = 0, gen_hz = 0, duration_s = 0;
     bool have_rate = false, have_samples = false, gen_only = false, stream = false;
-    bool buffered = false;
+    bool buffered = false, have_dma_buf = false;
     stream_ctx_t sctx = { 0 };
     capture_result_t res = { 0 };
     generator_t gen = { .sm = -1 };
@@ -393,6 +395,7 @@ int main(int argc, char **argv)
                 return 1;
             }
             cfg.dma_buf_bytes = (uint32_t)u;
+            have_dma_buf = true;
             break;
         case 'h':
             usage(stdout);
@@ -457,6 +460,8 @@ int main(int argc, char **argv)
             }
             /* The old in-RAM path still serves --raw and the naive baseline. */
             buffered = raw_path != NULL || cfg.mode != CAPTURE_DMA;
+            if (!buffered && !have_dma_buf)
+                cfg.dma_buf_bytes = CAPTURE_DMA_BUF_RECORD;
             if (buffered) {
                 if (!have_samples) {
                     fprintf(stderr, "%s needs --samples or --duration\n",

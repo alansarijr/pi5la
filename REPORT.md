@@ -65,6 +65,7 @@ All measurements are from 2026-09-16 unless dated otherwise. Items marked
 | Trigger (M7) | `low`/`falling`/`rising` block on an idle-high line, `high` fires; rising edge lands just before sample 0 |
 | UART (M6) | 115200 8N1 loopback, 8000 bytes, `cmp` → MATCH |
 | Auto-stop (2026-09-19) | `--duration 60s --silence-timeout 1s` (then named `--idle-stop`) ended a capture on its own 1 s after the signal stopped, with the generator and again with a real 115200 UART line (decoded byte-exact, 0 stalls, exit 0) |
+| Streaming to disk (2026-09-21) | 30 s at 2 MSa/s x 8 ch: RSS flat at 6016 kB (it would have been ~120 MB in RAM before), 0 stalls, exit 0 |
 | Live listening (2026-09-19) | `uart-listen.sh` decoded UART text as it arrived: 15.7 M samples streamed at 2 MSa/s, 0 stalls |
 
 ### 3.3 Rate ceiling
@@ -132,8 +133,14 @@ So the usable clock is about rate / 10 (safe) to rate / 4.
 - **Live decoding (*unmeasured*).** `uart-listen` feeds sigrok's Python
   decoders, which probably can't keep up with 50 MSa/s. For fast signals,
   capture to a file and decode afterwards.
-- **Recording length (*unmeasured*).** One byte per sample is 50 MB/s at
-  50 MSa/s. SD card speed and free space limit how long a recording can be.
+- **Recording length.** One byte per sample, written straight to disk, so
+  length is bounded by the card, not RAM. The SD card in this Pi writes
+  **14.4 MB/s** (300 MB, `dd conv=fsync`, 2026-09-21), but it stalls in bursts:
+  at 2 MB/s a 4 x 1 MiB ring (~2 s of slack) overflowed after 7 s, while
+  4 MiB periods ran 30 s clean. File capture therefore uses a 4 x 4 MiB ring by
+  default. Practical continuous ceiling: well under 14 MB/s, so about 10 MSa/s
+  on 8 channels; above that use `--monitor`, which writes only bursts.
+  `.sr` files compress well: 60 M idle samples came to 59 kB.
 - **Electrical.** 3.3 V inputs only; anything else goes through a 74LVC245.
   Digital levels only; timing resolution is one sample (20 ns at 50 MSa/s).
   Loose jumpers distort signals above a few MHz. GPIO 2 and 3 have 1.8 kΩ

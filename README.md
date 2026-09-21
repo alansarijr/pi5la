@@ -180,7 +180,12 @@ pi5la --rate 2M --stream [--channels 8] [--trigger falling:0] | <decoder>
 
 **The capture runs until you stop it** unless you give a limit. Samples are
 written to disk as they arrive, so length is bounded by disk space, not RAM,
-and Ctrl-C always leaves a readable `.sr`.
+and Ctrl-C always leaves a readable `.sr`. Measured on the development Pi
+(2026-09-21): 30 s at 2 MSa/s x 8 channels held memory flat at 6 MB.
+
+The SD card writes 14.4 MB/s but stalls in bursts, so continuous recording is
+comfortable to about 10 MSa/s on 8 channels. Above that, or for long sessions,
+use `--monitor`.
 
 | Option | Meaning |
 |---|---|
@@ -201,7 +206,7 @@ and Ctrl-C always leaves a readable `.sr`.
 | `--mode` | `dma` (default) or `naive` (the M2 baseline). |
 | `--generator` | Square wave on GPIO 20 during capture, for loopback self-test. |
 | `--generator-only` | Run only the generator until Ctrl-C (M1). |
-| `--dma-buf` | Cyclic DMA period size in bytes (the ring holds 4 periods). |
+| `--dma-buf` | Cyclic DMA period size in bytes (the ring holds 4 periods). Writing to disk defaults to 4 MiB periods, `--stream` to 1 MiB. The card stalls in bursts, so the bigger ring is what keeps a recording from overflowing: at 2 MB/s, 1 MiB periods overflowed after 7 s while 4 MiB ran clean. |
 | `--stream` | Capture until Ctrl-C and write samples to stdout as they arrive (1 byte per sample, channel N in bit N). Refuses to write to a terminal: pipe it into a decoder. |
 
 Exit status: `0` OK, `1` error, `2` dropped samples detected. Stats and the

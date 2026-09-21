@@ -13,6 +13,14 @@
 #define CAPTURE_GPIO_COUNT 28        /* RP1 PIO drives GPIO 0..27 */
 #define CAPTURE_DMA_BUF_COUNT 4      /* cyclic ring periods (rp1-pio max 4) */
 #define CAPTURE_DMA_BUF_DEFAULT (1u << 20)
+/*
+ * Writing to disk needs more slack than streaming does: an SD card that
+ * averages 14 MB/s still stalls for seconds at a time, and a 4 x 1 MiB ring
+ * holds only ~2 s at 2 MB/s (measured 2026-09-21: it overflowed after 7 s,
+ * while 4 MiB periods ran 30 s clean). File capture therefore defaults to a
+ * 4 x 4 MiB ring; --stream and the tools keep the smaller one.
+ */
+#define CAPTURE_DMA_BUF_RECORD (4u << 20)
 
 typedef enum {
     CAPTURE_DMA = 0,

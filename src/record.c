@@ -377,6 +377,11 @@ int record_run(PIO pio, const capture_config_t *cfg, const record_opts_t *opts,
 
     ret = capture_stream(pio, cfg, sink, &r, sres);
 
+    /*
+     * A ring overflow or a signal ends the capture early, but everything
+     * written so far is good: finish the file instead of throwing it away.
+     * Only a write error (r.failed) means the payload is worthless.
+     */
     if (ret == 0 && !r.failed) {
         if (opts->monitor_dir) {
             uint64_t end_at;
