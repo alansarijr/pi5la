@@ -75,6 +75,18 @@ typedef struct {
     bool overflow;              /* DMA ring wrapped: sink too slow, stream stopped */
     bool sink_stopped;          /* sink returned non-zero */
     bool interrupted;           /* cfg->stop was set */
+
+    /*
+     * Wall clock, filled in *during* the run so the sink can read them: the
+     * caller holds this struct while capture_stream() is working.
+     *
+     * start_realtime_ns is taken the instant the state machine is enabled, so
+     * it marks sample 0 -- not the setup that precedes it. period_realtime_ns
+     * is refreshed as each period lands, which is what lets a long run follow
+     * the NTP-disciplined clock instead of drifting with the PIO crystal.
+     */
+    uint64_t start_realtime_ns;
+    uint64_t period_realtime_ns;
 } capture_stream_result_t;
 
 /*

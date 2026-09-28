@@ -32,9 +32,11 @@ int capture_stream(PIO pio, const capture_config_t *cfg, capture_sink_t sink, vo
     (void)cfg;
     memset(res, 0, sizeof(*res));
     res->rate_hz = clkdiv_hz(cfg->div);
+    res->start_realtime_ns = realtime_ns();
 
     if (g_big) {
         res->bytes = BIG_WORDS * 4;
+        res->period_realtime_ns = realtime_ns();
         sink(g_big, BIG_WORDS, ctx);
         res->total_s = 1.0;
         return 0;
@@ -51,6 +53,7 @@ int capture_stream(PIO pio, const capture_config_t *cfg, capture_sink_t sink, vo
             g_words[PERIOD_WORDS / 2 + 1] = 0x7e7e7e7e;
         }
         res->bytes += PERIOD_WORDS * 4;
+        res->period_realtime_ns = realtime_ns();
         if (sink(g_words, PERIOD_WORDS, ctx))
             break;
     }
@@ -103,6 +106,8 @@ static void rm_dir(const char *dir)
 
     for (i = 1; i <= 20; i++) {
         snprintf(path, sizeof(path), "%s/burst-%04d.sr", dir, i);
+        unlink(path);
+        snprintf(path, sizeof(path), "%s/burst-%04d.sr.meta.json", dir, i);
         unlink(path);
     }
     snprintf(path, sizeof(path), "%s/index.json", dir);
@@ -163,6 +168,43 @@ int main(void)
         free(index);
     }
 
+    /*
+     * Each burst describes itself in a sidecar, written only once its .sr is
+     * final. That is what lets a shipper decode a burst while the capture is
+     * still running, without reading index.json underneath a rewrite.
+     *
+     * The pattern puts the change at word 512 of period 2, so the first edge is
+     * at sample 2 * 4096 + 512 * 4 = 10240, and the pre-roll makes the file
+     * itself start 1000 samples earlier.
+     */
+    snprintf(path, sizeof(path), "%s/burst-0001.sr.meta.json", dir);
+    index = slurp(path, NULL);
+    CHECK(index != NULL);
+    if (index) {
+        CHECK(strstr(index, "\"first_edge_sample\": 10240") != NULL);
+        CHECK(strstr(index, "\"start_sample\": 9240") != NULL);
+        CHECK(strstr(index, "\"first_edge_time_ns\": 17") != NULL);   /* a real epoch */
+        CHECK(strstr(index, "\"start_time_ns\": 17") != NULL);
+        CHECK(strstr(index, "\"burst\": \"burst-0001.sr\"") != NULL);
+        CHECK(strstr(index, "\"protocol\": \"raw\"") != NULL);       /* none declared */
+        CHECK(strstr(index, "\"active_channels\": [0]") != NULL);    /* only ch0 moved */
+        CHECK(strstr(index, "\"clock_synchronised\":") != NULL);
+        CHECK(strstr(index, "\"edges\": 0,") == NULL);               /* it did move */
+        CHECK(strstr(index, "\"shipped\"") == NULL);                 /* nothing ships it */
+        free(index);
+    }
+
+    /* index.json carries the same instants, exactly, not rounded to a double. */
+    snprintf(path, sizeof(path), "%s/index.json", dir);
+    index = slurp(path, NULL);
+    CHECK(index != NULL);
+    if (index) {
+        CHECK(strstr(index, "\"first_edge_sample\": 10240") != NULL);
+        CHECK(strstr(index, "\"start_time_ns\": 17") != NULL);
+        CHECK(strstr(index, "\"protocol\": \"raw\"") != NULL);
+        free(index);
+    }
+
     /* The payload files are cleaned up, leaving only .sr files. */
     snprintf(path, sizeof(path), "%s/burst-0001.sr.logic", dir);
     CHECK(stat(path, &fst) != 0);
@@ -205,6 +247,62 @@ int main(void)
     CHECK(record_run((PIO)0, &cfg, &opts, &st, &sres) == 0);
     CHECK(st.bursts == 0 && st.written == 0 && !st.activity_seen);
     CHECK(count_files(dir, "burst") == 0);
+    rm_dir(dir);
+
+    /*
+     * --- a reused directory must never overwrite what is still in it -------
+     *
+     * The directory is the shipper's work queue, so a burst waiting to go, and
+     * the sidecar of one already sent, both stay behind. Numbering that
+     * restarted at 1 would clobber an unshipped burst and give two different
+     * bursts the same name.
+     */
+    memcpy(dir, dir_template, sizeof(dir));
+    CHECK(mkdtemp(dir) != NULL);
+    opts.monitor_dir = dir;
+    g_pattern = "..x..";
+    CHECK(record_run((PIO)0, &cfg, &opts, &st, &sres) == 0);
+    CHECK(st.bursts == 1);
+    CHECK(count_files(dir, "burst") == 1);          /* burst-0001.sr */
+
+    /* Second run over the same directory: the first burst must survive. */
+    CHECK(record_run((PIO)0, &cfg, &opts, &st, &sres) == 0);
+    CHECK(st.bursts == 1);
+    CHECK(count_files(dir, "burst") == 2);          /* 0001 kept, 0002 added */
+
+    /* A shipped burst leaves only its sidecar, and must not be reused either. */
+    snprintf(path, sizeof(path), "%s/burst-0002.sr", dir);
+    CHECK(unlink(path) == 0);
+    CHECK(record_run((PIO)0, &cfg, &opts, &st, &sres) == 0);
+    snprintf(path, sizeof(path), "%s/burst-0003.sr", dir);
+    CHECK(stat(path, &fst) == 0 && fst.st_size > 0);
+    snprintf(path, sizeof(path), "%s/burst-0002.sr", dir);
+    CHECK(stat(path, &fst) != 0);                   /* the tombstone's number is not retaken */
+    rm_dir(dir);
+
+    /* --- the declared protocol is recorded, and no --es-url ships nothing -- */
+    memcpy(dir, dir_template, sizeof(dir));
+    CHECK(mkdtemp(dir) != NULL);
+    opts.monitor_dir = dir;
+    opts.protocol = "uart";
+    opts.decode_channel = 0;
+    opts.baud = 115200;
+    g_pattern = "..x..";
+    CHECK(record_run((PIO)0, &cfg, &opts, &st, &sres) == 0);
+    CHECK(st.bursts == 1);
+    CHECK(st.shipped == 0 && st.ship_deferred == 0);    /* no --es-url, no shipper */
+
+    snprintf(path, sizeof(path), "%s/burst-0001.sr.meta.json", dir);
+    index = slurp(path, NULL);
+    CHECK(index != NULL);
+    if (index) {
+        CHECK(strstr(index, "\"protocol\": \"uart\"") != NULL);
+        CHECK(strstr(index, "\"decode_channel\": 0") != NULL);
+        CHECK(strstr(index, "\"baud\": 115200") != NULL);
+        free(index);
+    }
+    opts.protocol = NULL;
+    opts.baud = 0;
     rm_dir(dir);
 
     /* --- continuous with a silence timeout ------------------------------- */

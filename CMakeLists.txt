@@ -69,6 +69,7 @@ if(NOT PI5LA_TESTS_ONLY)
         src/capture.c
         src/dmacyclic.c
         src/record.c
+        src/shipper.c
         src/fdebug.c
         src/generator.c
     )
@@ -102,7 +103,7 @@ if(NOT PI5LA_TESTS_ONLY)
 
     # record.c drives the streaming/monitor logic; the test stubs capture_stream,
     # so it compiles record.c directly instead of linking pi5la_hw.
-    add_executable(test_record tests/test_record.c src/record.c)
+    add_executable(test_record tests/test_record.c src/record.c src/shipper.c)
     target_include_directories(test_record PRIVATE ${PIOLIB_INCLUDE_DIR})
     target_link_libraries(test_record PRIVATE pi5la_core)
     add_test(NAME test_record COMMAND test_record)

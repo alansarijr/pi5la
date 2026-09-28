@@ -8,6 +8,8 @@ int main(void)
     double v;
     uint64_t u;
     clkdiv_t d;
+    clocksync_t cs;
+    uint64_t ns;
 
     CHECK(parse_si("10M", &v) && v == 10e6);
     CHECK(parse_si("100k", &v) && v == 100e3);
@@ -29,6 +31,16 @@ int main(void)
     CHECK(!clkdiv_for_hz(1000, &d));
     CHECK(clkdiv_for_hz(3e6, &d) && d.div_int == 66 && d.div_frac == 171);
     CHECK(!clkdiv_is_integer(d));
+
+    /* Wall clock: nanosecond resolution, and it moves forwards. */
+    ns = realtime_ns();
+    CHECK(ns > 1700000000000000000ull);     /* comfortably after 2023 */
+    CHECK(realtime_ns() >= ns);
+
+    /* Clock discipline: whatever this machine's NTP state is, the read itself
+       must work and report a bound rather than nonsense. */
+    CHECK(clocksync_read(&cs));
+    CHECK(cs.max_error_us >= 0);
 
     CHECK_DONE();
 }

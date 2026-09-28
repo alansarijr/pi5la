@@ -26,12 +26,15 @@ typedef struct {
     uint64_t total;         /* samples fed so far */
     uint64_t last_change;   /* absolute index just past the last change seen */
     uint64_t burst_start;   /* absolute index where the open burst starts */
+    uint64_t first_edge;    /* absolute index of the change that opened the burst */
 } burst_t;
 
 /* What the caller should do with the period it just fed in. */
 typedef struct {
     bool begin;             /* open a burst starting at `start` */
     uint64_t start;
+    uint64_t first_edge;    /* the change itself, before `pre` is taken off
+                               `start`: when the traffic actually arrived */
     bool write;             /* append samples [write_from, write_to) */
     uint64_t write_from;
     uint64_t write_to;

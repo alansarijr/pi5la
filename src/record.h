@@ -30,6 +30,25 @@ typedef struct {
     double post_s;              /* tail kept after the last change */
     uint64_t max_samples;       /* 0 = unlimited */
     uint64_t max_bytes;         /* 0 = unlimited; payload bytes written */
+
+    /*
+     * What is on the bus, declared before the run starts -- never guessed from
+     * the data. The capture itself does not care: it detects edges. This only
+     * says how a burst should be decoded downstream, and is recorded with
+     * every burst so the files on disk describe themselves.
+     */
+    const char *protocol;       /* "uart", "raw", ...; NULL means "raw" */
+    int decode_channel;         /* channel to decode; -1 when not applicable */
+    unsigned baud;              /* 0 when the protocol has no baud rate */
+
+    /* Live shipping: with es_url set, each burst is handed to sr2es.py as it
+       closes instead of waiting for the whole run to finish (src/shipper.c). */
+    const char *es_url;
+    const char *es_index;
+    const char *sr2es_path;     /* NULL: resolved next to this binary, then PATH */
+    const char *uart_type;
+    const char *port;
+    bool insecure;
 } record_opts_t;
 
 typedef struct {
@@ -41,6 +60,8 @@ typedef struct {
     bool samples_cap_hit;
     bool size_cap_hit;
     bool write_failed;
+    unsigned shipped;           /* bursts handed to a shipper */
+    unsigned ship_deferred;     /* bursts left for a later sweep (shipper busy) */
 } record_stats_t;
 
 /*

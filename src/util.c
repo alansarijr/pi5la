@@ -3,6 +3,8 @@
 
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/timex.h>
 #include <time.h>
 
 bool parse_si(const char *s, double *out)
@@ -86,4 +88,33 @@ double monotonic_s(void)
 
     clock_gettime(CLOCK_MONOTONIC, &ts);
     return ts.tv_sec + ts.tv_nsec * 1e-9;
+}
+
+uint64_t realtime_ns(void)
+{
+    struct timespec ts;
+
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ull + (uint64_t)ts.tv_nsec;
+}
+
+bool clocksync_read(clocksync_t *out)
+{
+    struct timex tx;
+    int state;
+
+    memset(&tx, 0, sizeof(tx));     /* modes == 0: read without adjusting */
+    memset(out, 0, sizeof(*out));
+    state = adjtimex(&tx);
+    if (state < 0)
+        return false;
+
+    /*
+     * TIME_ERROR means the clock is not synchronised; the other states all mean
+     * an NTP daemon is steering it (TIME_INS/DEL/OOP/WAIT only announce a leap
+     * second). STA_UNSYNC says the same thing and is what ntpd/chrony clears.
+     */
+    out->synchronised = state != TIME_ERROR && !(tx.status & STA_UNSYNC);
+    out->max_error_us = tx.maxerror;
+    return true;
 }

@@ -198,6 +198,10 @@ use `--monitor`.
 | `--gap` | Silence that ends a burst, `--monitor` only (default 100 ms). |
 | `--pre` | Lead-in kept before the first change (default 10 ms). Pulled from a small RAM ring, so the start of a transmission is never clipped. |
 | `--post` | Tail kept after the last change (default 50 ms). |
+| `--es-url URL` | Send each burst to Elasticsearch **as it closes**, instead of after the run. `--monitor` only. |
+| `--protocol P` | What is on the bus, declared up front: `uart` (default) or `raw`. Recorded with every burst. |
+| `--decode-channel N` | Which captured channel to decode (default 0; unused by `raw`). |
+| `--baud N` | UART baud rate (default 115200). |
 | `--duration` | Optional cap: stop after this much time (`500ms`, `10s`, `2m`). |
 | `--samples` | Optional cap: stop after this many samples. Required with `--raw` or `--mode naive`, which capture into RAM. |
 | `--max-size` | Stop once this much sample data is written (default 4G; suffix k/M/G). |
@@ -242,6 +246,12 @@ the waiting cost no disk.
 *(This option was called `--idle-stop` until 2026-09-21. The old name still
 works and prints a note.)*
 
+It works with `--monitor` too, and then ends the **whole session** once the bus
+has been quiet that long -- which is rarely what monitoring is for. Leave it off
+to keep recording until you stop it. When it does fire, pi5la now says so
+explicitly in monitor mode; before 2026-09-22 the session simply ended without a
+word, which looked like a crash.
+
 ### Monitoring a bus: `--monitor`
 
 For watching a bus over hours, recording idle would cost 1 byte per sample
@@ -254,11 +264,63 @@ pi5la --rate 2M --monitor ~/captures/mon1 --gap 100ms --pre 10ms --post 50ms
 
 ```
 ~/captures/mon1/
-    index.json      rate, channels, and for each burst: start_sample,
-                    start_time (wall clock), duration_s, gap_before_s
+    index.json               rate, channels, and every burst so far
     burst-0001.sr
+    burst-0001.sr.meta.json  when this burst arrived, and what it looked like
     burst-0002.sr
+    burst-0002.sr.meta.json
 ```
+
+Each burst gets its own sidecar, written once the `.sr` is final:
+
+```json
+{
+  "samplerate_hz": 2000000, "channels": 8, "base_gpio": 2,
+  "burst": "burst-0001.sr",
+  "start_sample": 20018, "samples": 121552,
+  "start_time_ns": 1789986306512345678,
+  "first_edge_sample": 40018,
+  "first_edge_time_ns": 1789986306522345678,
+  "duration_s": 0.060776, "gap_before_s": 2.99,
+  "protocol": "uart", "decode_channel": 0, "baud": 115200,
+  "edges": 214, "active_channels": [0],
+  "clock_synchronised": true, "clock_max_error_us": 1234,
+  "clock_drift_ns": -41200, "clock_source": "CLOCK_REALTIME"
+}
+```
+
+- **`first_edge_time_ns` is the arrival time**, stamped the moment the edge was
+  seen rather than worked out later. `start_time_ns` is `--pre` earlier, since
+  the file deliberately begins before the traffic does.
+- **Times are integer nanoseconds.** A double holds only about 240 ns at today's
+  epoch values, which is coarser than one sample at 50 MSa/s and coarser than a
+  bit on any bus worth sniffing. The float `start_time` is still written for
+  anything that already reads it.
+- **The clock is `CLOCK_REALTIME`**, which is what NTP disciplines.
+  `clock_synchronised` comes from `adjtimex(2)` and says whether anything was
+  actually steering the clock; `clock_drift_ns` is how far the capture's own
+  sample count had walked from it. pi5la warns at startup when the clock is
+  free-running, but never refuses to capture.
+- **`edges` and `active_channels` are protocol-blind**, counted from the samples
+  themselves, so a burst is describable even when no decoder understands the bus.
+- The sidecar is written *after* the `.sr` is finalised, so its presence means
+  the burst is complete. That is what a shipper waits for, rather than reading
+  `index.json` while it is being rewritten.
+- **Numbering resumes** when a directory is reused: a run that finds
+  `burst-0003.sr` starts at `burst-0004.sr` and says so. The directory doubles
+  as the shipper's work queue, so a burst waiting to be sent, and the sidecar
+  tombstone of one already sent, both stay behind -- restarting at 1 would
+  overwrite an unshipped burst and give two different bursts the same name.
+  `index.json` still describes only the run that wrote it; the per-burst
+  sidecars are the record that spans runs.
+- **How soon a burst appears** is set by the DMA period, not by the shipper: a
+  burst cannot be seen until the period holding it fills, which is **2.1 s at
+  2 MSa/s** with the 4 MiB default (`--dma-buf 262144` brings that to ~130 ms).
+  Then `--gap` of silence has to pass, and `sigrok-cli` has to start. The large
+  default is there because an SD card stalls for seconds under a *continuous*
+  capture; monitor mode writes almost nothing, so a smaller period is much
+  safer here -- but watch for `DMA ring overflow` and raise it again if one
+  appears.
 
 - **Nothing is missed.** The DMA capture never pauses; every period is scanned
   for a change, and the lead-in ring means a burst file starts *before* the
@@ -342,7 +404,62 @@ sr2es.py ~/captures/mon-test --channel 0               # a whole monitor session
 sr2es.py capture.sr --es-url https://es.example:9200   # and upload it
 ```
 
-A document per message, matching the index mapping:
+### Live: shipping each burst as it ends
+
+Waiting for a monitor session to be killed before anything reaches the database
+is no good for a bus you are watching for hours. With `--es-url`, pi5la hands
+each burst to `sr2es` the instant it closes:
+
+```bash
+pi5la --rate 2M --monitor ~/captures/mon1 \
+      --es-url https://es.example:9200 --protocol uart --baud 115200
+```
+
+A message is in the index about `--gap` + `--post` + decode time after the line
+falls quiet — roughly a second at the defaults — rather than whenever the run is
+stopped.
+
+- **Nothing slow runs in the capture path.** Decoding and uploading always
+  happen in a separate process (`sr2es.py --ship DIR`), never inside the capture
+  loop: a `sigrok-cli` run or a stalled POST there would overrun the four-period
+  DMA ring and drop samples.
+- **One shipper at a time.** A burst that closes while one is still working is
+  simply left on disk; the next sweep finds it. There is no queue to lose — what
+  is on disk *is* the work list.
+- **A failed upload is retried.** The NDJSON is written before the upload, so a
+  cluster that was down comes back to find its backlog waiting, and the next
+  burst's shipper sends it. Nothing is re-decoded that was decoded already.
+- **Confirmed data is deleted.** Once the cluster accepts a burst, its `.sr` and
+  `.ndjson` go, and the sidecar is kept as the tombstone (`"shipped": true`).
+  `--protocol raw` is the exception: its document carries no payload, so the
+  `.sr` is the only copy of the waveform and stays.
+- **Credentials are never on the command line.** `ES_API_KEY`, or `ES_USER` and
+  `ES_PASSWORD`, are inherited from pi5la's environment.
+
+`sr2es.py --ship DIR` can also be run by hand, on a live directory or a finished
+one, and will pick up exactly whatever has not been shipped yet.
+
+### Protocols
+
+The bus is **declared before the capture runs** and recorded with every burst;
+nothing guesses it from the data. `--protocol` picks the decoder:
+
+| `--protocol` | What it does |
+|---|---|
+| `uart` (default) | Decodes with `sigrok-cli`, one document per message. |
+| `raw` | No decoder at all: one document per burst, carrying when it arrived, how long it ran, how many edges it had and which channels moved. |
+
+`raw` is what makes this useful on a bus nothing here understands yet — the
+traffic is still timestamped and stored. Adding I²C or SPI means adding a
+`PROTOCOLS` entry in `sr2es.py` (a decoder command line, its annotation classes,
+how to group events, and that bus's own fields), not rewriting anything. Neither
+is implemented yet: neither can be checked on the loopback rig.
+
+A burst's sidecar records the protocol it was captured under, and that wins over
+`--protocol` — the flag may just be a sweep's default, while whoever ran the
+capture knew what was on the wire.
+
+### The document
 
 ```json
 {
@@ -352,35 +469,52 @@ A document per message, matching the index mapping:
   "duration": 1004500,
   "length_bytes": 12,
   "payload_hex": "68656c6c6f20657320310d0a",
-  "psf": { "psd": {
-    "uart_type": "TTL-3V3", "port": "ch0", "baud_rate": 115200,
-    "data_bits": 8, "parity": "none", "stop_bits": 1, "framing_error": false,
-    "capture": { "channel": 0, "gpio": 2, "byte_count": 12,
-                 "text": "hello es 1\\r\\n", "file": "burst-0001.sr",
-                 "start_sample": 20018, "end_sample": 22027,
-                 "samplerate_hz": 2000000, "burst": "burst-0001.sr",
-                 "gap_before_s": 1.986508 } } }
+  "psf": {
+    "channel": 0, "gpio": 2, "port": "ch0",
+    "text": "hello es 1\\r\\n", "byte_count": 12, "error": false,
+    "file": "burst-0001.sr", "burst": "burst-0001.sr",
+    "start_sample": 20018, "end_sample": 22027,
+    "samplerate_hz": 2000000, "gap_before_s": 1.986508,
+    "first_edge_time_ns": 1789986306522345678,
+    "clock_synchronised": true, "clock_max_error_us": 1234,
+    "clock_drift_ns": -41200,
+    "uart_type": "TTL-3V3", "baud_rate": 115200,
+    "data_bits": 8, "parity": "none", "stop_bits": 1, "framing_error": false
+  }
 }
 ```
 
-The shape follows the documents already in `wiresploit-poc1`: `event_type`
-`onboard`, uppercase `protocol`, and a **flat** `psd` with `uart_type`, `port`,
-`baud_rate`, `data_bits`, `parity`, `stop_bits` and `framing_error`, exactly as
-that index's other UART source writes them. Everything specific to a
-logic-analyzer capture (which file, which burst, which samples, the decoded
-text) is nested under `psd.capture`, where it cannot clash. `--uart-type` and
-`--port` set the first two fields; they default to `TTL-3V3` and `chN`.
+**`psf` is flat** — no `psd` level and no sub-objects. It carries a common core
+present whatever the protocol, and the declared protocol's own fields beside it:
+
+- **Core:** `channel`, `gpio`, `port`, `file`, `burst`, `byte_count`, `text`,
+  `error`, `start_sample`, `end_sample`, `samplerate_hz`, `gap_before_s`,
+  `first_edge_time_ns`, `clock_synchronised`, `clock_max_error_us`,
+  `clock_drift_ns`; plus `errors`, `payload_truncated` and `time_source` when
+  they apply.
+- **UART adds:** `uart_type`, `baud_rate`, `data_bits`, `parity`, `stop_bits`,
+  `framing_error`.
+- **RAW adds:** `edges`, `active_channels`.
+
+Because `psf` is flat, a protocol field that shadowed a core one would silently
+replace it, so `sr2es.py` asserts at import that none can.
+
+> This shape **differs from the older documents in `wiresploit-poc1`**, which
+> nest a flat `psd` under `psf`. The two now sit side by side in the index, and
+> the `wiresploit-analyst` role cannot delete, so the old ones stay until an
+> admin removes them.
 
 - **Messages** are bytes grouped by idle gap: a new message starts when the
   line has been quiet for more than `--gap-bytes` byte-times (default 10, about
   0.9 ms at 115200). Framing and parity errors reported by sigrok are listed
-  in `psf.psd.capture.errors`, and `psd.framing_error` is set.
+  in `psf.errors`, and `psf.framing_error` is set.
 - **`duration` is nanoseconds**, from the first bit to the last, and
-  `timestamp` is `date_nanos`. Both are built from integers: a double has only
-  ~240 ns of resolution at today's epoch values, which is coarser than one
+  `timestamp` is `date_nanos`. Both are built from integers throughout: a double
+  has only ~240 ns of resolution at today's epoch values, coarser than one
   sample at 50 MSa/s.
-- **Absolute time** comes from `<capture>.sr.meta.json`, which pi5la writes
-  beside every capture, or from `index.json` for a monitor session. Without a
+- **Absolute time** comes from the sidecar pi5la writes beside every capture
+  (`<capture>.sr.meta.json`, or `burst-NNNN.sr.meta.json` in a monitor session),
+  which carries `start_time_ns` and `first_edge_time_ns` as integers. Without a
   sidecar the tool falls back to the file's mtime and says so.
 - **Decoding reuses `sigrok-cli`** (`-A uart=rx-data --protocol-decoder-samplenum`),
   the same decoder that produced byte-exact results in M6.
@@ -395,7 +529,7 @@ text) is nested under `psd.capture`, where it cannot clash. `--uart-type` and
   ```
 
 **Verified on the Pi (2026-09-21).** A three-burst monitor session decoded to
-three documents, 36 bytes in total:
+three documents, 36 bytes in total, with the older `psd` shape:
 
 ```
 payload_hex 68656c6c6f20657320310d0a   psf.text "hello es 1
@@ -403,9 +537,11 @@ payload_hex 68656c6c6f20657320310d0a   psf.text "hello es 1
 timestamps 2.008 s apart, psf.burst and gap_before_s carried through
 ```
 
-The `_bulk` upload itself has not been exercised against a live cluster yet.
-
-Only UART is implemented so far; I²C and SPI would add their own `psf` fields.
+**Live shipping and the flat `psf` shape have not been run on the Pi yet.** They
+are covered by the host tests, and the whole chain — a burst closing, pi5la
+spawning the shipper, the document reaching a stub `_bulk` endpoint, the files
+being cleaned up, and an outage being retried — was exercised against a stub
+cluster on a development machine.
 
 ---
 
@@ -434,6 +570,15 @@ Run it:
     --pi5la ~/build-pi5la/pi5la --captures ~/captures
 ```
 
+To let the page ship bursts to Elasticsearch, export the credentials **before**
+starting the server — pi5la's shipper inherits its environment, and the page
+says so up front when they are missing:
+
+```bash
+export ES_USER ES_PASSWORD        # or ES_API_KEY
+~/pi5la-ui-venv/bin/python ~/pi5la/web/app.py --pi5la ~/build-pi5la/pi5la
+```
+
 Then open `http://<pi-address>:9090`. Options: `--host`, `--port`,
 `--sigrok`, `--captures` (default `~/captures`).
 
@@ -445,14 +590,31 @@ What the page does:
   SIGINT, so pi5la still writes the partial file. pi5la's own output (stall
   events, throughput, `silence timeout: …`, bursts) streams into the page, and rates above
   the proven 50 MB/s show a warning.
+- **Send to Elasticsearch** — in monitor mode, a switch turns on live shipping:
+  each burst is decoded and uploaded as it ends, exactly as `--es-url` does on
+  the command line. Pick `UART` for one document per decoded message, or `Raw`
+  for one per burst with no decoder (and the `.sr` files kept, since a raw
+  document carries no payload). The URL, index, decode channel, baud rate and
+  line type are all here; **credentials are not**, and never travel through the
+  page — see below.
 - **Live decode** — `pi5la --stream` piped into `sigrok-cli`, the same pipeline
   as `uart-listen`, with the decoded bytes appended as they arrive.
 - **Captures** — list, download, delete, and decode a saved file as UART, I²C
-  or SPI.
+  or SPI. Bursts already shipped stay listed, marked with what they sent, even
+  though their `.sr` has been deleted: the sidecar is what records that they
+  existed.
+
+**Credentials never go through the browser.** There is no password field: the
+shipper reads `ES_API_KEY`, or `ES_USER` and `ES_PASSWORD`, from the environment
+the web server was started with. A form field would put a password into the POST
+body, the job log and the browser's history. When the server has no credentials,
+the page shows a red marker in the header and explains how to restart it, rather
+than letting every burst fail silently.
 
 Only one job runs at a time, since a capture holds `/dev/pio0`; a second Start
 is refused with a message. `tests/test_web_args.py` covers the argument
-building and runs as part of `ctest`.
+building — including that no credential can reach the command line — and runs as
+part of `ctest`.
 
 ---
 

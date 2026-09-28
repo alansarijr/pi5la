@@ -122,6 +122,131 @@ class TestCaptureCommand(unittest.TestCase):
         self.assertFalse(any("SD card" in w for w in warnings))
 
 
+class TestMonitorStopConditions(unittest.TestCase):
+    """
+    Monitor mode is meant to sit and watch. A silence timeout or a duration
+    quietly ends the whole session, so the page says so before starting rather
+    than leaving someone wondering why the recording stopped.
+    """
+
+    def test_silence_timeout_is_called_out(self):
+        _, warnings = args.capture_command(
+            {"rate": "2M", "monitor": "true", "silence_timeout": "1s"},
+            "/bin/pi5la", "/c/mon-1")
+        self.assertTrue(any("stop by itself after 1s of silence" in w for w in warnings))
+
+    def test_duration_is_called_out(self):
+        _, warnings = args.capture_command(
+            {"rate": "2M", "monitor": "true", "duration": "30s"}, "/bin/pi5la", "/c/mon-1")
+        self.assertTrue(any("stop by itself after 30s" in w for w in warnings))
+
+    def test_plain_monitor_says_nothing(self):
+        _, warnings = args.capture_command({"rate": "2M", "monitor": "true"},
+                                           "/bin/pi5la", "/c/mon-1")
+        self.assertEqual(warnings, [])
+
+    def test_continuous_mode_is_not_warned_about(self):
+        """A one-shot recording is exactly what a silence timeout is for."""
+        _, warnings = args.capture_command(
+            {"rate": "2M", "silence_timeout": "1s"}, "/bin/pi5la", "/c/x.sr")
+        self.assertEqual(warnings, [])
+
+
+class TestShipping(unittest.TestCase):
+    """
+    Live Elasticsearch export. The rules mirror src/main.c, so the page can
+    reject a bad combination before a capture is started.
+    """
+
+    def form(self, **kw):
+        f = {"rate": "2M", "channels": "8", "monitor": "true", "ship": "true",
+             "es_url": "http://es.example:9200"}
+        f.update(kw)
+        return f
+
+    def ship_args(self, **kw):
+        argv, warnings = args.capture_command(self.form(**kw), "/bin/pi5la", "/c/mon-1")
+        return argv[argv.index("--es-url"):], warnings
+
+    def test_off_by_default(self):
+        argv, _ = args.capture_command({"rate": "2M", "monitor": "true"},
+                                       "/bin/pi5la", "/c/mon-1")
+        self.assertNotIn("--es-url", argv)
+        self.assertNotIn("--protocol", argv)
+
+    def test_uart_forwards_the_decode_settings(self):
+        argv, warnings = self.ship_args(ship_protocol="uart", decode_channel="3",
+                                        baud="9600", es_index="wiresploit-poc1",
+                                        uart_type="RS-232")
+        self.assertEqual(argv, ["--es-url", "http://es.example:9200",
+                                "--protocol", "uart", "--decode-channel", "3",
+                                "--baud", "9600", "--es-index", "wiresploit-poc1",
+                                "--uart-type", "RS-232"])
+        # http:// to a remote host is worth saying out loud, but is not an error.
+        self.assertTrue(any("clear text" in w for w in warnings))
+
+    def test_raw_sends_no_decode_settings(self):
+        """Nothing is decoded, so a channel and a baud rate would be meaningless."""
+        argv, warnings = self.ship_args(ship_protocol="raw")
+        self.assertEqual(argv, ["--es-url", "http://es.example:9200", "--protocol", "raw"])
+        self.assertTrue(any("keeps the .sr files" in w for w in warnings))
+
+    def test_raw_says_baud_is_ignored(self):
+        _, warnings = self.ship_args(ship_protocol="raw", baud="115200")
+        self.assertTrue(any("baud rate is ignored" in w for w in warnings))
+
+    def test_needs_monitor_mode(self):
+        """Shipping sends one burst at a time, so there have to be bursts."""
+        with self.assertRaises(args.InvalidInput) as cm:
+            args.capture_command(self.form(monitor="false"), "/bin/pi5la", "/c/x.sr")
+        self.assertIn("monitor", str(cm.exception))
+
+    def test_needs_a_url(self):
+        with self.assertRaises(args.InvalidInput):
+            args.capture_command(self.form(es_url=""), "/bin/pi5la", "/c/mon-1")
+
+    def test_rejects_bad_input(self):
+        for kw in ({"es_url": "ftp://es.example"},
+                   {"es_url": "es.example:9200"},
+                   {"ship_protocol": "i2c"},          # sigrok knows it, sr2es does not
+                   {"ship_protocol": "../../etc"},
+                   {"es_index": "Wiresploit"},        # uppercase is not a legal index name
+                   {"es_index": "a b"},
+                   {"uart_type": "bad;type"},
+                   {"baud": "0"},
+                   {"decode_channel": "9"}):
+            with self.assertRaises(args.InvalidInput, msg=repr(kw)):
+                args.capture_command(self.form(**kw), "/bin/pi5la", "/c/mon-1")
+
+    def test_decode_channel_must_be_captured(self):
+        with self.assertRaises(args.InvalidInput) as cm:
+            args.capture_command(self.form(channels="2", decode_channel="4"),
+                                 "/bin/pi5la", "/c/mon-1")
+        self.assertIn("decode channel", str(cm.exception))
+
+    def test_warns_about_plain_http_and_insecure_tls(self):
+        _, warnings = self.ship_args()
+        self.assertTrue(any("clear text" in w for w in warnings))
+        _, local = self.ship_args(es_url="http://127.0.0.1:9999")
+        self.assertFalse(any("clear text" in w for w in local))
+        _, insecure = self.ship_args(es_url="https://es.example:9200", insecure="true")
+        self.assertTrue(any("certificate" in w for w in insecure))
+
+    def test_no_credential_ever_reaches_the_command_line(self):
+        """
+        pi5la's shipper reads ES_API_KEY / ES_USER / ES_PASSWORD from the
+        environment. A form field would put a password in the job log, the POST
+        body and browser history, so nothing here may forward one.
+        """
+        argv, _ = args.capture_command(
+            self.form(es_password="hunter2", password="hunter2", es_user="analyst",
+                      es_api_key="secretkey"),
+            "/bin/pi5la", "/c/mon-1")
+        joined = " ".join(argv)
+        for secret in ("hunter2", "analyst", "secretkey"):
+            self.assertNotIn(secret, joined)
+
+
 class TestCaptureRefs(unittest.TestCase):
     def test_monitor_dir_name(self):
         stamp = datetime.datetime(2026, 9, 21, 10, 15, 0)

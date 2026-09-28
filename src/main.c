@@ -24,6 +24,8 @@
 #define DEFAULT_PRE "10ms"
 #define DEFAULT_POST "50ms"
 #define DEFAULT_MAX_SIZE "4G"
+#define DEFAULT_PROTOCOL "uart"
+#define DEFAULT_BAUD 115200
 
 static volatile sig_atomic_t g_stop;
 
@@ -38,6 +40,7 @@ static void usage(FILE *f)
     fprintf(f,
         "usage: pi5la --rate RATE --out FILE.sr [--silence-timeout T]\n"
         "       pi5la --rate RATE --monitor DIR [--gap T] [--pre T] [--post T]\n"
+        "       pi5la --rate RATE --monitor DIR --es-url URL [--protocol P] [--baud N]\n"
         "       pi5la --rate RATE --samples N --raw FILE [--mode naive]\n"
         "       pi5la --generator FREQ --generator-only\n"
         "       pi5la --rate RATE --stream [--channels N] [--trigger T:N] | sigrok-cli ...\n"
@@ -70,13 +73,30 @@ static void usage(FILE *f)
         "  --dma-buf BYTES    cyclic DMA period size, ring of %d periods (default %u when\n"
         "                     writing to disk, %u for --stream)\n"
         "\n"
+        "Live export (--monitor only). Each burst is decoded and sent as it ends, rather\n"
+        "than after the whole run, and is timestamped when its first edge arrived:\n"
+        "\n"
+        "  --es-url URL       send each burst to Elasticsearch as it closes, via sr2es\n"
+        "  --protocol P       what is on the bus, declared up front: uart (default) or\n"
+        "                     raw (no decode: time, duration, edges, active channels)\n"
+        "  --decode-channel N which channel to decode (default 0; not used by raw)\n"
+        "  --baud N           UART baud rate (default %d)\n"
+        "  --uart-type S      psf.uart_type, e.g. TTL-3V3, RS-232 (default TTL-3V3)\n"
+        "  --port S           psf.port label for the probed line (default chN)\n"
+        "  --es-index NAME    index to write to\n"
+        "  --insecure         skip TLS certificate checks (self-signed clusters)\n"
+        "  --sr2es PATH       sr2es.py to run (default: next to pi5la, then PATH)\n"
+        "\n"
+        "Credentials are never given on the command line: set ES_API_KEY, or ES_USER and\n"
+        "ES_PASSWORD, in the environment.\n"
+        "\n"
         "Silence, gap and size are checked once per DMA period, so a stop can lag by one\n"
         "period (1 MiB = 1 M samples at 8 channels).\n"
         "\n"
         "Exit status: 0 ok, 1 error, %d dropped samples detected.\n",
         DEFAULT_GAP, DEFAULT_PRE, DEFAULT_POST, DEFAULT_MAX_SIZE, GENERATOR_DEFAULT_GPIO,
         CAPTURE_DMA_BUF_COUNT, CAPTURE_DMA_BUF_RECORD, CAPTURE_DMA_BUF_DEFAULT,
-        EXIT_DROPPED);
+        DEFAULT_BAUD, EXIT_DROPPED);
 }
 
 static int write_raw(const char *path, const uint32_t *words, size_t n_words)
@@ -152,13 +172,28 @@ static void report_stream(const capture_config_t *cfg, const record_opts_t *rec,
                 st->bursts, rec->monitor_dir, kept);
         if (!st->activity_seen)
             fprintf(stderr, "monitor: no change seen on any channel: check the wiring\n");
-    } else if (rec->silence_s > 0) {
-        if (!st->activity_seen)
+        if (rec->es_url) {
+            fprintf(stderr, "shipping: %u shipper run(s), %u burst(s) left to a later "
+                            "sweep\n", st->shipped, st->ship_deferred);
+            fprintf(stderr, "shipping: anything still in %s was not accepted; re-run "
+                            "sr2es --ship on it\n", rec->monitor_dir);
+        }
+    }
+
+    /*
+     * Why the capture ended, whichever mode it was in. Monitor mode used to
+     * fall in the other half of an if/else here and so stopped without ever
+     * saying that a silence timeout had done it.
+     */
+    if (rec->silence_s > 0) {
+        if (st->silence_stopped)
+            fprintf(stderr, "silence timeout: stopped after %.3f s without a change%s\n",
+                    rec->silence_s,
+                    rec->monitor_dir ? " (leave --silence-timeout off to keep monitoring"
+                                       " until you stop it)" : "");
+        else if (!rec->monitor_dir && !st->activity_seen)
             fprintf(stderr, "silence timeout: no change seen on any channel\n");
-        else if (st->silence_stopped)
-            fprintf(stderr, "silence timeout: stopped after %.3f s without a change\n",
-                    rec->silence_s);
-        else
+        else if (!rec->monitor_dir)
             fprintf(stderr, "silence timeout: stopped before the line went quiet\n");
     }
     if (st->samples_cap_hit)
@@ -236,7 +271,9 @@ static int check_dev_pio(void)
 int main(int argc, char **argv)
 {
     enum { OPT_GEN_ONLY = 256, OPT_DMA_BUF, OPT_RAW, OPT_STREAM, OPT_DURATION, OPT_IDLE_STOP,
-           OPT_SILENCE, OPT_MONITOR, OPT_GAP, OPT_PRE, OPT_POST, OPT_MAX_SIZE };
+           OPT_SILENCE, OPT_MONITOR, OPT_GAP, OPT_PRE, OPT_POST, OPT_MAX_SIZE,
+           OPT_ES_URL, OPT_PROTOCOL, OPT_DECODE_CH, OPT_BAUD, OPT_UART_TYPE, OPT_PORT,
+           OPT_ES_INDEX, OPT_INSECURE, OPT_SR2ES };
     static const struct option opts[] = {
         { "rate", required_argument, NULL, 'r' },
         { "samples", required_argument, NULL, 'n' },
@@ -258,6 +295,15 @@ int main(int argc, char **argv)
         { "generator-only", no_argument, NULL, OPT_GEN_ONLY },
         { "stream", no_argument, NULL, OPT_STREAM },
         { "dma-buf", required_argument, NULL, OPT_DMA_BUF },
+        { "es-url", required_argument, NULL, OPT_ES_URL },
+        { "protocol", required_argument, NULL, OPT_PROTOCOL },
+        { "decode-channel", required_argument, NULL, OPT_DECODE_CH },
+        { "baud", required_argument, NULL, OPT_BAUD },
+        { "uart-type", required_argument, NULL, OPT_UART_TYPE },
+        { "port", required_argument, NULL, OPT_PORT },
+        { "es-index", required_argument, NULL, OPT_ES_INDEX },
+        { "insecure", no_argument, NULL, OPT_INSECURE },
+        { "sr2es", required_argument, NULL, OPT_SR2ES },
         { "help", no_argument, NULL, 'h' },
         { NULL, 0, NULL, 0 },
     };
@@ -269,8 +315,9 @@ int main(int argc, char **argv)
         .dma_buf_bytes = CAPTURE_DMA_BUF_DEFAULT,
         .stop = &g_stop,
     };
-    record_opts_t rec = { 0 };
+    record_opts_t rec = { .protocol = DEFAULT_PROTOCOL, .decode_channel = -1 };
     const char *out_path = NULL, *raw_path = NULL;
+    bool have_decode_ch = false;
     double rate = 0, gen_hz = 0, duration_s = 0;
     bool have_rate = false, have_samples = false, gen_only = false, stream = false;
     bool buffered = false, have_dma_buf = false;
@@ -340,6 +387,42 @@ int main(int argc, char **argv)
                 fprintf(stderr, "invalid --post '%s' (e.g. 50ms)\n", optarg);
                 return 1;
             }
+            break;
+        case OPT_ES_URL:
+            rec.es_url = optarg;
+            break;
+        case OPT_PROTOCOL:
+            rec.protocol = optarg;
+            break;
+        case OPT_DECODE_CH:
+            if (!parse_si_u64(optarg, &u) || u > 7) {
+                fprintf(stderr, "invalid --decode-channel '%s' (0-7)\n", optarg);
+                return 1;
+            }
+            rec.decode_channel = (int)u;
+            have_decode_ch = true;
+            break;
+        case OPT_BAUD:
+            if (!parse_si_u64(optarg, &u) || u == 0 || u > 100000000ull) {
+                fprintf(stderr, "invalid --baud '%s'\n", optarg);
+                return 1;
+            }
+            rec.baud = (unsigned)u;
+            break;
+        case OPT_UART_TYPE:
+            rec.uart_type = optarg;
+            break;
+        case OPT_PORT:
+            rec.port = optarg;
+            break;
+        case OPT_ES_INDEX:
+            rec.es_index = optarg;
+            break;
+        case OPT_INSECURE:
+            rec.insecure = true;
+            break;
+        case OPT_SR2ES:
+            rec.sr2es_path = optarg;
             break;
         case OPT_MAX_SIZE:
             if (!parse_si_u64(optarg, &rec.max_bytes) || rec.max_bytes == 0) {
@@ -448,6 +531,11 @@ int main(int argc, char **argv)
                 fprintf(stderr, "give either --out or --monitor, not both\n");
                 return 1;
             }
+            if (rec.es_url && !rec.monitor_dir) {
+                fprintf(stderr, "--es-url ships one burst at a time, so it needs "
+                                "--monitor\n");
+                return 1;
+            }
             if (duration_s > 0) {
                 double n = ceil(duration_s * clkdiv_hz(cfg.div));
 
@@ -487,7 +575,42 @@ int main(int argc, char **argv)
                 if (rec.monitor_dir && rec.silence_s > 0 && rec.silence_s < rec.gap_s)
                     fprintf(stderr, "note: --silence-timeout is shorter than --gap, so the "
                                     "capture stops before a burst can close\n");
+
+                /*
+                 * The protocol is declared here, before the run: the capture
+                 * detects edges and does not care what is on the wire, but the
+                 * shipper needs to know how to decode a burst, and every burst
+                 * records what was declared.
+                 */
+                if (strcmp(rec.protocol, "raw") != 0) {
+                    if (!rec.baud)
+                        rec.baud = DEFAULT_BAUD;
+                    if (!have_decode_ch)
+                        rec.decode_channel = 0;
+                } else {
+                    if (rec.baud)
+                        fprintf(stderr, "note: --baud is ignored with --protocol raw\n");
+                    rec.baud = 0;
+                    rec.decode_channel = -1;
+                }
+                if (rec.decode_channel >= 0 && (unsigned)rec.decode_channel >= cfg.channels) {
+                    fprintf(stderr, "--decode-channel %d is not below --channels %u\n",
+                            rec.decode_channel, cfg.channels);
+                    return 1;
+                }
             }
+        }
+        /*
+         * Timestamps on shipped documents are only as good as this clock, so
+         * say so up front when nothing is disciplining it. Never a refusal:
+         * losing NTP is not a reason to stop capturing.
+         */
+        if ((rec.monitor_dir || out_path)) {
+            clocksync_t cs;
+
+            if (clocksync_read(&cs) && !cs.synchronised)
+                fprintf(stderr, "warning: the system clock is not NTP-synchronised; "
+                                "timestamps may be wrong (clock_synchronised: false)\n");
         }
         if (cfg.base_gpio + cfg.channels > CAPTURE_GPIO_COUNT) {
             fprintf(stderr, "capture GPIOs %u..%u out of range\n", cfg.base_gpio,

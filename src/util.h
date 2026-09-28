@@ -36,4 +36,25 @@ bool clkdiv_is_integer(clkdiv_t div);
 
 double monotonic_s(void);
 
+/* Wall-clock time as integer nanoseconds since the epoch (CLOCK_REALTIME,
+   which is what NTP disciplines). A double holds only ~240 ns of resolution at
+   today's epoch values, so anything that has to stay exact uses this. */
+uint64_t realtime_ns(void);
+
+/*
+ * How much the system clock can be trusted, from adjtimex(2).
+ *
+ * `synchronised` is false when the kernel's STA_UNSYNC flag is set, i.e. no NTP
+ * daemon is disciplining the clock; `max_error_us` is the kernel's own bound on
+ * how far off it might be. Recorded with every burst so a consumer can tell a
+ * locked clock from a free-running one.
+ */
+typedef struct {
+    bool synchronised;
+    long max_error_us;
+} clocksync_t;
+
+/* Fills *out. Returns false only if the kernel call itself failed. */
+bool clocksync_read(clocksync_t *out);
+
 #endif

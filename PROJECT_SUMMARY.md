@@ -4,7 +4,7 @@ pi5la turns a **Raspberry Pi 5** into an **8-channel logic analyzer** using the 
 block inside the Pi's RP1 chip. It captures GPIO 2–9, writes sigrok `.sr` files that
 open in PulseView, and can listen to a UART live.
 
-- **Spec:** `../SPECS.md`
+- **Spec:** `SPECS.md`
 - **Detailed build steps and measurements:** `README.md`
 - **Findings report:** `REPORT.md`
 

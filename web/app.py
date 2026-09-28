@@ -14,6 +14,7 @@ their own session, so a stop can signal the whole pipeline.
 """
 
 import argparse
+import glob
 import json
 import os
 import queue
@@ -257,12 +258,24 @@ def create_app(runner):
     def stop():
         return jsonify(stopped=runner.stop())
 
+    def es_credentials_present():
+        """
+        Whether this server could ship to Elasticsearch at all.
+
+        pi5la's shipper inherits this process's environment, so credentials must
+        already be exported when the server is started. Asking here lets the page
+        say so before a capture is launched, rather than after every burst fails.
+        """
+        return bool(os.environ.get("ES_API_KEY") or
+                    (os.environ.get("ES_USER") and os.environ.get("ES_PASSWORD")))
+
     @app.get("/api/status")
     def status():
         job = runner.current()
+        env = {"es_credentials": es_credentials_present()}
         if job is None:
-            return jsonify(job=None)
-        return jsonify(job=job.status(), lines=job.lines[-200:])
+            return jsonify(job=None, env=env)
+        return jsonify(job=job.status(), lines=job.lines[-200:], env=env)
 
     @app.get("/api/events")
     def events():
@@ -299,6 +312,55 @@ def create_app(runner):
         except (OSError, ValueError):
             return None
 
+    def list_bursts(session_dir, name, index):
+        """
+        Every burst of a session, from the per-burst sidecars.
+
+        A burst that has been shipped to Elasticsearch has had its .sr deleted
+        and only its sidecar is left, so listing the files on disk would make it
+        disappear from the page. The sidecars are what span the whole session --
+        index.json only ever describes the run that wrote it.
+        """
+        seen, bursts = set(), []
+        for meta_path in sorted(glob.glob(os.path.join(session_dir, "burst-*.sr.meta.json"))):
+            try:
+                with open(meta_path) as f:
+                    meta = json.load(f)
+            except (OSError, ValueError):
+                continue
+            sr_name = os.path.basename(meta_path)[:-len(".meta.json")]
+            sr_path = os.path.join(session_dir, sr_name)
+            here = os.path.isfile(sr_path)
+            seen.add(sr_name)
+            bursts.append({
+                "name": "%s/%s" % (name, sr_name),
+                "size": os.stat(sr_path).st_size if here else 0,
+                "start_time": meta.get("start_time"),
+                "duration_s": meta.get("duration_s"),
+                "gap_before_s": meta.get("gap_before_s"),
+                "protocol": meta.get("protocol"),
+                "shipped": bool(meta.get("shipped")),
+                "shipped_docs": meta.get("shipped_docs"),
+                "on_disk": here,
+            })
+
+        # Sessions recorded before sidecars existed are described by index.json.
+        for b in index.get("bursts", []):
+            sr_name = b.get("file", "")
+            if sr_name in seen or not os.path.isfile(os.path.join(session_dir, sr_name)):
+                continue
+            bursts.append({
+                "name": "%s/%s" % (name, sr_name),
+                "size": os.stat(os.path.join(session_dir, sr_name)).st_size,
+                "start_time": b.get("start_time"),
+                "duration_s": b.get("duration_s"),
+                "gap_before_s": b.get("gap_before_s"),
+                "shipped": False,
+                "on_disk": True,
+            })
+        bursts.sort(key=lambda b: b["name"])
+        return bursts
+
     @app.get("/api/captures")
     def list_captures():
         items = []
@@ -310,18 +372,7 @@ def create_app(runner):
                               "mtime": st.st_mtime})
             elif argbuild.MONITOR_DIR_RE.fullmatch(name) and os.path.isdir(path):
                 index = read_index(path) or {}
-                bursts = []
-                for b in index.get("bursts", []):
-                    burst_path = os.path.join(path, b.get("file", ""))
-                    if not os.path.isfile(burst_path):
-                        continue
-                    bursts.append({
-                        "name": "%s/%s" % (name, b["file"]),
-                        "size": os.stat(burst_path).st_size,
-                        "start_time": b.get("start_time"),
-                        "duration_s": b.get("duration_s"),
-                        "gap_before_s": b.get("gap_before_s"),
-                    })
+                bursts = list_bursts(path, name, index)
                 items.append({"kind": "monitor", "name": name,
                               "mtime": os.stat(path).st_mtime,
                               "size": sum(b["size"] for b in bursts),

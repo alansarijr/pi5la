@@ -24,7 +24,10 @@ CAPTURE_NAME_RE = re.compile(r"^[A-Za-z0-9._-]+\.sr$")
 MONITOR_DIR_RE = re.compile(r"^mon-\d{8}-\d{6}$")
 DEFAULTS = {"gap": "100ms", "pre": "10ms", "post": "50ms", "max_size": "4G"}
 TRIGGERS = ("rising", "falling", "high", "low")
-PROTOCOLS = ("uart", "i2c", "spi")
+PROTOCOLS = ("uart", "i2c", "spi")          # sigrok decoders, for the live/decode views
+SHIP_PROTOCOLS = ("uart", "raw")            # what sr2es can ship; see tools/sr2es.py
+ES_URL_RE = re.compile(r"^https?://[^\s/]+(/.*)?$")
+INDEX_NAME_RE = re.compile(r"^[a-z0-9][a-z0-9._-]*$")   # Elasticsearch index rules
 
 
 class InvalidInput(ValueError):
@@ -207,6 +210,15 @@ def capture_command(form, pi5la="pi5la", out_path="capture.sr"):
         argv += ["--dma-buf", str(n)]
 
     warnings = []
+    if monitor and silence and silence.strip():
+        warnings.append(
+            "monitor mode will stop by itself after %s of silence; clear the silence "
+            "timeout to keep recording until you press Stop." % silence.strip())
+    if monitor and duration and duration.strip():
+        warnings.append(
+            "monitor mode will stop by itself after %s; clear the max duration to keep "
+            "recording until you press Stop." % duration.strip())
+    argv += _ship_args(form, monitor, channels, warnings)
     warning = throughput_warning(rate_hz, channels)
     if warning:
         warnings.append(warning)
@@ -218,6 +230,73 @@ def capture_command(form, pi5la="pi5la", out_path="capture.sr"):
     if duration_s and not monitor and duration_s * disk_rate > 4e9:
         warnings.append("this capture would write over 4 GB; --max-size will stop it first.")
     return argv, warnings
+
+
+def _ship_args(form, monitor, channels, warnings):
+    """
+    Live Elasticsearch export flags, or nothing when it is switched off.
+
+    Mirrors the checks in src/main.c so the page reports a bad combination
+    before a capture is started rather than after pi5la refuses it.
+
+    Credentials are deliberately absent: pi5la's shipper reads ES_API_KEY, or
+    ES_USER and ES_PASSWORD, from the environment it inherits from this server.
+    A password travelling through a form field would end up in POST bodies,
+    browser history and the job log.
+    """
+    if not _flag(form.get("ship")):
+        return []
+
+    es_url = str(form.get("es_url", "")).strip()
+    if not es_url:
+        raise InvalidInput("give an Elasticsearch URL, or turn off sending to it")
+    if not ES_URL_RE.fullmatch(es_url):
+        raise InvalidInput("Elasticsearch URL must look like http://host:9200, got %r"
+                           % es_url)
+    if not monitor:
+        raise InvalidInput(
+            "sending to Elasticsearch ships one burst at a time, so it needs monitor mode")
+
+    protocol = str(form.get("ship_protocol", "uart")).strip() or "uart"
+    if protocol not in SHIP_PROTOCOLS:
+        _fail("protocol", protocol)
+
+    argv = ["--es-url", es_url, "--protocol", protocol]
+
+    if protocol == "raw":
+        if str(form.get("baud", "")).strip():
+            warnings.append("baud rate is ignored with the raw protocol: nothing is decoded.")
+        warnings.append(
+            "raw ships one document per burst and keeps the .sr files, because a raw "
+            "document carries no payload.")
+    else:
+        channel = _int(form.get("decode_channel", 0), "decode channel", 0, 7)
+        if channel >= channels:
+            raise InvalidInput("decode channel %d is not below channels %d"
+                               % (channel, channels))
+        baud = _int(form.get("baud", 115200), "baud rate", 50, 20000000)
+        argv += ["--decode-channel", str(channel), "--baud", str(baud)]
+
+    index = str(form.get("es_index", "")).strip()
+    if index:
+        if not INDEX_NAME_RE.fullmatch(index) or len(index) > 255:
+            _fail("index name", index)
+        argv += ["--es-index", index]
+
+    uart_type = str(form.get("uart_type", "")).strip()
+    if uart_type:
+        if not re.fullmatch(r"[A-Za-z0-9 ._+/-]{1,40}", uart_type):
+            _fail("UART type", uart_type)
+        argv += ["--uart-type", uart_type]
+
+    if _flag(form.get("insecure")):
+        argv.append("--insecure")
+        warnings.append("TLS certificate checks are off for this upload.")
+
+    if es_url.startswith("http://") and not es_url.startswith("http://127.0.0.1"):
+        warnings.append(
+            "http:// sends the documents and the credentials in clear text over the network.")
+    return argv
 
 
 def live_commands(form, pi5la="pi5la", sigrok="sigrok-cli"):

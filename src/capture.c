@@ -372,6 +372,7 @@ int capture_stream(PIO pio, const capture_config_t *cfg, capture_sink_t sink, vo
 
     pio_sm_set_enabled(pio, (uint)hw.sm, true);
     t_enable = monotonic_s();
+    res->start_realtime_ns = realtime_ns();     /* sample 0 in wall-clock time */
 
     while (!stopped(cfg)) {
         if (dmacyclic_read(hw.fd, (unsigned)hw.sm, (uint32_t)period, buf)) {
@@ -386,6 +387,7 @@ int capture_stream(PIO pio, const capture_config_t *cfg, capture_sink_t sink, vo
             break;
         }
         t_last = monotonic_s();
+        res->period_realtime_ns = realtime_ns();    /* pins this period's last sample */
         res->bytes += period;
 
         stall = take_rxstall(hw.fd, (uint)hw.sm);

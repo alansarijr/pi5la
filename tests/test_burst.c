@@ -17,12 +17,14 @@ int main(void)
     init(&b);
     burst_feed(&b, 1000, false, 0, 0, &a);
     CHECK(!a.begin && !a.write && !a.end);
+    CHECK(a.first_edge == 0);                     /* only meaningful when begin */
     burst_feed(&b, 1000, false, 0, 0, &a);
     CHECK(!a.write && b.total == 2000);
 
     /* A change at 500 in the third period starts a burst 100 samples earlier. */
     burst_feed(&b, 1000, true, 500, 600, &a);
     CHECK(a.begin && a.start == 2400);            /* 2500 - pre */
+    CHECK(a.first_edge == 2500 && b.first_edge == 2500);   /* the arrival itself */
     CHECK(a.write && a.write_from == 2400 && a.write_to == 3000);
     CHECK(!a.end);                                /* only 400 quiet so far */
 
@@ -42,6 +44,7 @@ int main(void)
     init(&b);
     burst_feed(&b, 1000, true, 100, 200, &a);
     CHECK(a.begin && a.start == 0);               /* 100 - pre, clamped to the start */
+    CHECK(a.first_edge == 100);                   /* clamping `start` never moves it */
     burst_feed(&b, 2000, false, 0, 0, &a);
     CHECK(a.end && a.end_at == 400);              /* 200 + post */
     CHECK(a.write && a.write_from == 1000 && a.write_to == 3000);
@@ -50,11 +53,13 @@ int main(void)
     /* The next change starts a second burst. */
     burst_feed(&b, 1000, true, 500, 500, &a);
     CHECK(a.begin && a.start == 3400 && a.write_from == 3400);
+    CHECK(a.first_edge == 3500);
 
     /* A short burst followed by silence inside one period ends in that period. */
     init(&b);
     burst_feed(&b, 5000, true, 100, 200, &a);
     CHECK(a.begin && a.start == 0);               /* pre clamped at the start of capture */
+    CHECK(a.first_edge == 100);
     CHECK(a.end && a.end_at == 400);
     CHECK(a.write && a.write_from == 0 && a.write_to == 5000);
 

@@ -20,7 +20,7 @@ Paste this into a new Claude chat, or attach it, to continue the project.
 ## Environment
 
 - **PC:** Windows 11. Repo at `D:\CSE\wiresploit\pi5la` (git, local only, no remote).
-  - The spec is at `D:\CSE\wiresploit\SPECS.md`.
+  - The spec is at `SPECS.md`, at the repo root.
   - Commit messages end with a `Co-Authored-By: Claude` line.
 - **Compile-checking on the PC:** WSL Ubuntu 22.04 has a test tree in `~/pi5la-check`,
   with pioasm, a local piolib install, and libzip unpacked locally (no sudo). A rebuild
@@ -60,6 +60,12 @@ web UI. See `REPORT.md` for the findings,
 - **Unbounded capture, `--silence-timeout`, `--monitor`** (2026-09-21): 30 s at 2 MSa/s
   with RSS flat at 6 MB; monitor recorded 3 bursts, 1.09% of the elapsed time.
 
+**Added but not yet run on the Pi: live per-burst shipping** (`--es-url`). Each burst is
+handed to `sr2es.py` as it closes rather than after the run, timestamped at its first
+edge. Host tests cover it, and the whole chain was exercised against a stub `_bulk`
+endpoint on a dev machine. **The document shape changed**: `psf` is now flat (no `psd`,
+no sub-objects), a common core plus the declared protocol's fields. See the README.
+
 **Not yet verified:**
 1. ~~`pi5la --stream` / `uart-listen.sh`~~ Done 2026-09-19: decoded `hello live` as it
    arrived (15.7 M samples at 2 MSa/s, 0 stalls). `--duration` / `--idle-stop` verified on
@@ -83,6 +89,12 @@ web UI. See `REPORT.md` for the findings,
    74LVC245 buffer and a shared GND**, which I don't have wired yet.
 4. `ratesweep` `status=nosignal` rows: the code path has not been seen on hardware
    (every run so far was `status=ok`).
+5. **Live shipping on the Pi.** `pi5la --rate 2M --monitor DIR --es-url URL` against a
+   stub cluster first: a document must arrive about a second after each line, the `.sr`
+   must disappear once confirmed, `psf.first_edge_time_ns` must match `date +%s.%N` at
+   send time, and stalls must stay at zero. Then `--protocol raw` (the square-wave
+   generator works, since nothing decodes it), then the outage retry, then the real
+   cluster. Also check `chronyc tracking` and that `psf.clock_synchronised` is true.
 
 ## Key technical decisions (and why)
 
@@ -117,8 +129,27 @@ web UI. See `REPORT.md` for the findings,
   sigrok-cli, groups bytes into messages by idle gap, and writes bulk NDJSON for the
   `wiresploit-poc1` index, uploading when `--es-url` is given. Timestamps are built in
   integer nanoseconds (a double is ~240 ns coarse at epoch scale). Wall-clock time comes
-  from `<out>.sr.meta.json`, written by record.c, or a monitor `index.json`.
-  Credentials only via `ES_API_KEY` / `ES_USER` + `ES_PASSWORD`.
+  from a per-burst `burst-NNNN.sr.meta.json` (or `<out>.sr.meta.json`), written by
+  record.c. Credentials only via `ES_API_KEY` / `ES_USER` + `ES_PASSWORD`.
+- **Live shipping:** `--es-url` makes record.c spawn `sr2es.py --ship DIR` as each burst
+  closes (`src/shipper.c`, `posix_spawn`, its own session). Never waited for until
+  teardown -- decoding or uploading inside the capture path would overrun the
+  four-period DMA ring. One shipper at a time; disk state is the queue, so a burst that
+  closes while one is busy, a decode that failed, and a cluster that was down all
+  resolve the same way: the next sweep finds it. A confirmed upload deletes the `.sr`
+  and `.ndjson` and marks the sidecar `shipped`; `--protocol raw` keeps its `.sr`,
+  because a raw document carries no payload.
+- **Arrival timestamps:** a burst is stamped when its first edge is seen, not when it is
+  decoded. `capture.c` now reports `start_realtime_ns` (at `pio_sm_set_enabled`, so
+  sample 0 is not skewed by setup) and `period_realtime_ns` (as each period lands);
+  record.c pins each period's last sample to the latter and places everything relative
+  to it, so a long run follows NTP instead of drifting with the PIO crystal. Clock
+  discipline is read with `adjtimex(2)` and recorded per burst.
+- **Protocols are declared, never guessed:** `--protocol uart|raw` is set before the run
+  and written into every sidecar, which wins over the shipper's flag. `raw` skips
+  decoding entirely and ships one document per burst (arrival time, duration, edge
+  count, active channels), so an unknown bus still reaches the index. I2C/SPI are a
+  `PROTOCOLS` entry in sr2es.py when there is hardware to verify them on.
 - **Exit codes:** `0` OK, `1` error, `2` dropped samples (RXSTALL or ring overflow). The
   wall-clock loss estimate is informational only.
 - M8 (RLE, pre-trigger) was skipped by agreement.

@@ -29,13 +29,15 @@ void burst_feed(burst_t *b, uint64_t n_samples, bool changed, uint64_t first_cha
         /* Start `pre` samples before the first change; the caller clamps this
          * to what its ring actually still holds. */
         out->begin = true;
-        out->start = base + first_change;
+        out->first_edge = base + first_change;
+        out->start = out->first_edge;
         if (out->start > b->pre_samples)
             out->start -= b->pre_samples;
         else
             out->start = 0;
         b->recording = true;
         b->burst_start = out->start;
+        b->first_edge = out->first_edge;
 
         out->write = true;
         out->write_from = out->start;
